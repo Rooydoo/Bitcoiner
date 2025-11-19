@@ -33,6 +33,7 @@ from trading.risk_manager import RiskManager
 
 # Phase 4: Reporting & Notification
 from notification.telegram_notifier import TelegramNotifier
+from notification.telegram_bot_handler import TelegramBotHandler
 from reporting.daily_report import ReportGenerator
 
 # Utils
@@ -128,8 +129,17 @@ class CryptoTrader:
             chat_id=telegram_config.get('chat_id'),
             enabled=telegram_config.get('enabled', False)
         )
+
+        # Telegram Botハンドラー初期化（コマンド受信用）
+        chat_id = telegram_config.get('chat_id')
+        self.telegram_bot = TelegramBotHandler(
+            bot_token=telegram_config.get('bot_token'),
+            allowed_chat_ids=[chat_id] if chat_id else [],
+            trader_instance=self
+        )
+
         self.report_generator = ReportGenerator(self.db_manager)
-        logger.info("  ✓ Telegram通知、レポート生成モジュール初期化完了")
+        logger.info("  ✓ Telegram通知、Botハンドラー、レポート生成モジュール初期化完了")
 
         # 状態管理
         self.is_running = False
@@ -688,6 +698,9 @@ class CryptoTrader:
         # モデル読み込み
         self.load_models()
 
+        # Telegram Bot起動（コマンド受信用）
+        self.telegram_bot.start()
+
         self.is_running = True
         last_health_check = datetime.now()
         cycle_count = 0
@@ -836,6 +849,9 @@ class CryptoTrader:
         logger.info("=" * 70)
 
         self.is_running = False
+
+        # Telegram Bot停止
+        self.telegram_bot.stop()
 
         # 最終レポート生成
         self.send_daily_report()

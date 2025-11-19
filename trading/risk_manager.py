@@ -55,6 +55,7 @@ class RiskManager:
         self.partial_profit_taken = {}  # symbol -> bool
         self.consecutive_losses = 0  # 連続損失カウント
         self.trading_paused = False  # 取引一時停止フラグ
+        self.pause_timestamp = None  # 一時停止タイムスタンプ
         self.daily_pnl = 0.0  # 日次損益
         self.weekly_pnl = 0.0  # 週次損益
         self.monthly_pnl = 0.0  # 月次損益
