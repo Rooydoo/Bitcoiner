@@ -38,6 +38,10 @@ from reporting.daily_report import ReportGenerator
 # Utils
 from utils.logger import setup_logger
 from utils.config_loader import ConfigLoader
+from utils.env_validator import validate_environment
+from utils.config_validator import validate_config
+from utils.health_check import HealthChecker, run_health_check
+from utils.performance_tracker import PerformanceTracker
 
 # ロガー設定
 logger = setup_logger('main_trader', 'main_trader.log', console=True)
@@ -62,9 +66,26 @@ class CryptoTrader:
         logger.info(f"モード: {'テスト' if test_mode else '本番'}")
         logger.info("=" * 70)
 
+        # 起動前検証
+        logger.info("\n[検証] 環境変数・設定ファイルをチェック中...")
+
+        # 環境変数検証
+        if not validate_environment(test_mode=test_mode, exit_on_error=True):
+            raise RuntimeError("環境変数の検証に失敗しました")
+
+        # 設定ファイル検証
+        if not validate_config(config_path, exit_on_error=True):
+            raise RuntimeError("設定ファイルの検証に失敗しました")
+
+        logger.info("\n[検証] 全ての検証に合格しました ✓\n")
+
         # 設定読み込み
         self.config = ConfigLoader(config_path)
         self.trading_pairs = self.config.get('trading_pairs', [])
+
+        # ヘルスチェッカー・パフォーマンストラッカー初期化
+        self.health_checker = HealthChecker()
+        self.performance_tracker = None  # 後で初期化
 
         # Phase 1: データインフラ初期化
         logger.info("\n[Phase 1] データインフラ初期化")
@@ -529,22 +550,54 @@ class CryptoTrader:
         logger.info(f"サイクル間隔: {interval_minutes}分")
         logger.info("=" * 70 + "\n")
 
+        # 起動時健全性チェック
+        logger.info("\n[健全性チェック] システム状態確認中...")
+        is_healthy, issues, warnings = self.health_checker.run_all_checks()
+        self.health_checker.print_health_report(is_healthy, issues, warnings)
+
+        if not is_healthy:
+            logger.error("システムに問題があります。上記の問題を解決してから起動してください。")
+            return
+
+        # パフォーマンストラッカー初期化
+        self.performance_tracker = PerformanceTracker(self.db_manager)
+
         # モデル読み込み
         self.load_models()
 
         self.is_running = True
         last_daily_report_date = None
+        last_health_check = datetime.now()
+        cycle_count = 0
 
         try:
             while self.is_running:
                 # 取引サイクル実行
                 self.run_trading_cycle()
+                cycle_count += 1
 
                 # 日次レポート（1日1回）
                 today = datetime.now().date()
                 if last_daily_report_date != today:
                     self.send_daily_report()
                     last_daily_report_date = today
+
+                # 健全性チェック（1時間ごと）
+                if (datetime.now() - last_health_check).total_seconds() > 3600:
+                    logger.info("\n[定期健全性チェック]")
+                    is_healthy, issues, warnings = self.health_checker.run_all_checks()
+
+                    if not is_healthy:
+                        error_msg = "システムに問題が検出されました:\n" + "\n".join(issues)
+                        logger.error(error_msg)
+                        self.notifier.notify_error('健全性チェック失敗', error_msg)
+
+                    last_health_check = datetime.now()
+
+                # パフォーマンスサマリー（10サイクルごと）
+                if cycle_count % 10 == 0 and self.performance_tracker:
+                    logger.info("\n[パフォーマンスサマリー]")
+                    self.performance_tracker.print_performance_report('all')
 
                 # 次のサイクルまで待機
                 logger.info(f"次のサイクルまで{interval_minutes}分待機...\n")

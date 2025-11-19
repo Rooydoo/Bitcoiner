@@ -5,9 +5,17 @@
 
 import logging
 import time
+import sys
+from pathlib import Path
 from typing import Dict, Optional, List
 from datetime import datetime
 import ccxt
+
+# プロジェクトルートをパスに追加
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# リトライ機能インポート
+from utils.retry import retry_on_network_error
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +57,25 @@ class OrderExecutor:
 
         logger.info(f"注文実行モジュール初期化（テストモード: {test_mode}）")
 
+    # ========== リトライ付きAPI呼び出しヘルパー ==========
+
+    @retry_on_network_error(max_retries=4, base_delay=2.0)
+    def _create_market_order_with_retry(self, symbol: str, side: str, amount: float):
+        """成行注文実行（リトライ付き）"""
+        return self.exchange.create_market_order(symbol, side, amount)
+
+    @retry_on_network_error(max_retries=4, base_delay=2.0)
+    def _fetch_balance_with_retry(self):
+        """残高取得（リトライ付き）"""
+        return self.exchange.fetch_balance()
+
+    @retry_on_network_error(max_retries=4, base_delay=2.0)
+    def _fetch_ticker_with_retry(self, symbol: str):
+        """ティッカー取得（リトライ付き）"""
+        return self.exchange.fetch_ticker(symbol)
+
+    # ========== 注文実行メソッド ==========
+
     def create_market_order(
         self,
         symbol: str,
@@ -76,7 +103,7 @@ class OrderExecutor:
             raise ValueError("API未接続 - APIキーを設定してください")
 
         try:
-            order = self.exchange.create_market_order(symbol, side, amount)
+            order = self._create_market_order_with_retry(symbol, side, amount)
             logger.info(f"成行注文実行: {side.upper()} {amount} {symbol}")
             return order
         except Exception as e:
@@ -194,7 +221,7 @@ class OrderExecutor:
             raise ValueError("API未接続")
 
         try:
-            balance = self.exchange.fetch_balance()
+            balance = self._fetch_balance_with_retry()
             if currency:
                 return balance.get(currency, {'free': 0.0, 'used': 0.0, 'total': 0.0})
             return balance
@@ -224,7 +251,7 @@ class OrderExecutor:
             raise ValueError("API未接続")
 
         try:
-            ticker = self.exchange.fetch_ticker(symbol)
+            ticker = self._fetch_ticker_with_retry(symbol)
             return ticker['last']
         except Exception as e:
             logger.error(f"価格取得失敗: {e}")

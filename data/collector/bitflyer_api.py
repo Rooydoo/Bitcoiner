@@ -4,10 +4,18 @@ import ccxt
 import logging
 import time
 import os
+import sys
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 import pandas as pd
 from dotenv import load_dotenv
+
+# プロジェクトルートをパスに追加
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+# リトライ機能インポート
+from utils.retry import retry_on_network_error
 
 # 環境変数読み込み
 load_dotenv()
@@ -43,6 +51,11 @@ class BitflyerDataCollector:
         self.exchange = ccxt.bitflyer(config)
         logger.info("bitFlyer接続初期化完了")
 
+    @retry_on_network_error(max_retries=4, base_delay=2.0)
+    def _fetch_trades_with_retry(self, symbol: str, since: Optional[int] = None, limit: int = 1000):
+        """約定データ取得（リトライ付き）"""
+        return self.exchange.fetch_trades(symbol, since=since, limit=limit)
+
     def fetch_ohlcv(
         self,
         symbol: str,
@@ -73,8 +86,8 @@ class BitflyerDataCollector:
             # bitFlyerはfetchOHLCV未サポート -> fetch_trades()からOHLCVを構築
             logger.info(f"fetch_trades()から{timeframe}のOHLCVを構築します")
 
-            # 約定履歴を取得
-            trades = self.exchange.fetch_trades(symbol, since=since, limit=1000)
+            # 約定履歴を取得（リトライ付き）
+            trades = self._fetch_trades_with_retry(symbol, since=since, limit=1000)
 
             if not trades:
                 logger.warning(f"約定データなし: {symbol}")
