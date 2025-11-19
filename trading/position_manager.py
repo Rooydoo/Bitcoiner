@@ -166,6 +166,87 @@ class PositionManager:
 
         return position
 
+    def partial_close_position(
+        self,
+        symbol: str,
+        exit_price: float,
+        close_ratio: float
+    ) -> Optional[Dict]:
+        """
+        ポジションを部分的にクローズ
+
+        Args:
+            symbol: 取引ペア
+            exit_price: 決済価格
+            close_ratio: クローズする割合（0.0-1.0）
+
+        Returns:
+            部分決済情報の辞書（存在しない場合はNone）
+        """
+        if symbol not in self.open_positions:
+            logger.warning(f"{symbol}のオープンポジションが見つかりません")
+            return None
+
+        if not (0.0 < close_ratio <= 1.0):
+            logger.error(f"close_ratioは0.0-1.0の範囲で指定してください: {close_ratio}")
+            return None
+
+        position = self.open_positions[symbol]
+
+        # 部分決済する数量を計算
+        partial_quantity = position.quantity * close_ratio
+        remaining_quantity = position.quantity * (1.0 - close_ratio)
+
+        # 部分決済のPNL計算
+        if position.side == 'long':
+            partial_pnl = (exit_price - position.entry_price) * partial_quantity
+        else:  # short
+            partial_pnl = (position.entry_price - exit_price) * partial_quantity
+
+        partial_pnl_pct = (partial_pnl / (position.entry_price * partial_quantity)) * 100 if partial_quantity > 0 else 0.0
+
+        logger.info(f"ポジション部分決済: {symbol} {position.side.upper()} "
+                   f"{close_ratio:.0%} ({partial_quantity:.6f} / {position.quantity:.6f}) "
+                   f"損益=¥{partial_pnl:,.0f} ({partial_pnl_pct:+.2f}%)")
+
+        # DBにトレード履歴を記録
+        if self.db_manager:
+            from datetime import datetime
+            trade_data = {
+                'symbol': symbol,
+                'side': position.side,
+                'price': exit_price,
+                'amount': partial_quantity,
+                'cost': exit_price * partial_quantity,
+                'fee': exit_price * partial_quantity * 0.0015,
+                'order_type': 'market',
+                'pnl': partial_pnl,
+                'timestamp': datetime.now().isoformat()
+            }
+            self.db_manager.insert_trade(trade_data)
+
+            # ポジションの数量を更新
+            updates = {
+                'entry_amount': remaining_quantity
+            }
+            self.db_manager.update_position(position.position_id, updates)
+
+        # ポジションの数量を更新
+        position.quantity = remaining_quantity
+
+        partial_close_info = {
+            'symbol': symbol,
+            'side': position.side,
+            'partial_quantity': partial_quantity,
+            'remaining_quantity': remaining_quantity,
+            'close_ratio': close_ratio,
+            'partial_pnl': partial_pnl,
+            'partial_pnl_pct': partial_pnl_pct,
+            'exit_price': exit_price
+        }
+
+        return partial_close_info
+
     def close_position(
         self,
         symbol: str,

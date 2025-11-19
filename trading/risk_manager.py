@@ -18,7 +18,11 @@ class RiskManager:
         max_position_size: float = 0.95,  # 最大ポジションサイズ（資金の95%）
         stop_loss_pct: float = 10.0,      # ストップロス（-10%）
         max_drawdown_pct: float = 20.0,   # 最大ドローダウン（-20%）
-        profit_taking_enabled: bool = True # 段階的利益確定を有効化
+        profit_taking_enabled: bool = True, # 段階的利益確定を有効化
+        consecutive_loss_limit: int = 5,  # 連続損失制限
+        max_daily_loss_pct: float = 5.0,  # 日次最大損失（%）
+        max_weekly_loss_pct: float = 10.0, # 週次最大損失（%）
+        max_monthly_loss_pct: float = 15.0 # 月次最大損失（%）
     ):
         """
         Args:
@@ -26,11 +30,19 @@ class RiskManager:
             stop_loss_pct: ストップロス率（%）
             max_drawdown_pct: 最大ドローダウン率（%）
             profit_taking_enabled: 段階的利益確定を有効化
+            consecutive_loss_limit: 連続損失制限
+            max_daily_loss_pct: 日次最大損失率（%）
+            max_weekly_loss_pct: 週次最大損失率（%）
+            max_monthly_loss_pct: 月次最大損失率（%）
         """
         self.max_position_size = max_position_size
         self.stop_loss_pct = stop_loss_pct
         self.max_drawdown_pct = max_drawdown_pct
         self.profit_taking_enabled = profit_taking_enabled
+        self.consecutive_loss_limit = consecutive_loss_limit
+        self.max_daily_loss_pct = max_daily_loss_pct
+        self.max_weekly_loss_pct = max_weekly_loss_pct
+        self.max_monthly_loss_pct = max_monthly_loss_pct
 
         # 段階的利益確定設定（要件定義書より）
         self.profit_levels = [
@@ -41,11 +53,23 @@ class RiskManager:
         # 履歴
         self.peak_equity = 0.0
         self.partial_profit_taken = {}  # symbol -> bool
+        self.consecutive_losses = 0  # 連続損失カウント
+        self.trading_paused = False  # 取引一時停止フラグ
+        self.daily_pnl = 0.0  # 日次損益
+        self.weekly_pnl = 0.0  # 週次損益
+        self.monthly_pnl = 0.0  # 月次損益
+        self.last_reset_day = None
+        self.last_reset_week = None
+        self.last_reset_month = None
 
         logger.info("リスク管理システム初期化")
         logger.info(f"  - ストップロス: {stop_loss_pct}%")
         logger.info(f"  - 最大ドローダウン: {max_drawdown_pct}%")
         logger.info(f"  - 段階的利益確定: {'有効' if profit_taking_enabled else '無効'}")
+        logger.info(f"  - 連続損失制限: {consecutive_loss_limit}回")
+        logger.info(f"  - 日次最大損失: {max_daily_loss_pct}%")
+        logger.info(f"  - 週次最大損失: {max_weekly_loss_pct}%")
+        logger.info(f"  - 月次最大損失: {max_monthly_loss_pct}%")
 
     def check_stop_loss(
         self,
@@ -229,6 +253,17 @@ class RiskManager:
         Returns:
             (判定結果, 理由)
         """
+        # 取引一時停止チェック
+        is_paused, pause_reason = self.is_trading_paused()
+        if is_paused:
+            return False, f"取引一時停止中: {pause_reason}"
+
+        # 期間損失制限チェック
+        if initial_capital:
+            period_limit_exceeded, reason = self.check_period_loss_limits(initial_capital)
+            if period_limit_exceeded:
+                return False, reason
+
         # 確信度チェック
         if signal_confidence < min_confidence:
             return False, f"確信度不足: {signal_confidence:.2%} < {min_confidence:.2%}"
@@ -280,6 +315,128 @@ class RiskManager:
         if symbol in self.partial_profit_taken:
             del self.partial_profit_taken[symbol]
             logger.debug(f"利益確定トラッキングリセット: {symbol}")
+
+    def record_trade_result(self, pnl: float, initial_capital: float):
+        """
+        取引結果を記録し、連続損失をトラッキング
+
+        Args:
+            pnl: 実現損益
+            initial_capital: 初期資本
+        """
+        from datetime import datetime
+
+        pnl_pct = (pnl / initial_capital) * 100 if initial_capital > 0 else 0.0
+
+        # 期間別PNLを更新
+        self._update_period_pnl(pnl)
+
+        # 連続損失トラッキング
+        if pnl < 0:
+            self.consecutive_losses += 1
+            logger.warning(f"連続損失: {self.consecutive_losses}回 (制限: {self.consecutive_loss_limit}回)")
+
+            # 連続損失制限に達した場合
+            if self.consecutive_losses >= self.consecutive_loss_limit:
+                self.trading_paused = True
+                logger.error(f"連続損失制限到達！取引を一時停止します（{self.consecutive_losses}回連続損失）")
+        else:
+            # 利益が出たらリセット
+            if self.consecutive_losses > 0:
+                logger.info(f"連続損失リセット（前回: {self.consecutive_losses}回）")
+            self.consecutive_losses = 0
+
+    def _update_period_pnl(self, pnl: float):
+        """
+        期間別PNLを更新
+
+        Args:
+            pnl: 実現損益
+        """
+        from datetime import datetime
+
+        now = datetime.now()
+        current_day = now.date()
+        current_week = now.isocalendar()[1]  # ISO週番号
+        current_month = now.month
+
+        # 日次リセット
+        if self.last_reset_day != current_day:
+            self.daily_pnl = 0.0
+            self.last_reset_day = current_day
+
+        # 週次リセット
+        if self.last_reset_week != current_week:
+            self.weekly_pnl = 0.0
+            self.last_reset_week = current_week
+
+        # 月次リセット
+        if self.last_reset_month != current_month:
+            self.monthly_pnl = 0.0
+            self.last_reset_month = current_month
+
+        # PNL追加
+        self.daily_pnl += pnl
+        self.weekly_pnl += pnl
+        self.monthly_pnl += pnl
+
+    def check_period_loss_limits(self, initial_capital: float) -> Tuple[bool, str]:
+        """
+        期間別損失制限をチェック
+
+        Args:
+            initial_capital: 初期資本
+
+        Returns:
+            (制限超過フラグ, 理由)
+        """
+        # 日次損失チェック
+        daily_loss_pct = (self.daily_pnl / initial_capital) * 100 if initial_capital > 0 else 0.0
+        if daily_loss_pct <= -self.max_daily_loss_pct:
+            msg = f"日次損失制限超過: {daily_loss_pct:.2f}% (制限: -{self.max_daily_loss_pct}%)"
+            logger.error(msg)
+            self.trading_paused = True
+            return True, msg
+
+        # 週次損失チェック
+        weekly_loss_pct = (self.weekly_pnl / initial_capital) * 100 if initial_capital > 0 else 0.0
+        if weekly_loss_pct <= -self.max_weekly_loss_pct:
+            msg = f"週次損失制限超過: {weekly_loss_pct:.2f}% (制限: -{self.max_weekly_loss_pct}%)"
+            logger.error(msg)
+            self.trading_paused = True
+            return True, msg
+
+        # 月次損失チェック
+        monthly_loss_pct = (self.monthly_pnl / initial_capital) * 100 if initial_capital > 0 else 0.0
+        if monthly_loss_pct <= -self.max_monthly_loss_pct:
+            msg = f"月次損失制限超過: {monthly_loss_pct:.2f}% (制限: -{self.max_monthly_loss_pct}%)"
+            logger.error(msg)
+            self.trading_paused = True
+            return True, msg
+
+        return False, "OK"
+
+    def is_trading_paused(self) -> Tuple[bool, str]:
+        """
+        取引が一時停止中かチェック
+
+        Returns:
+            (停止中フラグ, 理由)
+        """
+        if self.trading_paused:
+            # 停止理由を判定
+            if self.consecutive_losses >= self.consecutive_loss_limit:
+                return True, f"連続損失制限到達（{self.consecutive_losses}回）"
+            else:
+                return True, "損失制限超過"
+
+        return False, "OK"
+
+    def resume_trading(self):
+        """取引を再開"""
+        self.trading_paused = False
+        self.consecutive_losses = 0
+        logger.info("取引再開")
 
     def get_risk_metrics(self) -> Dict:
         """

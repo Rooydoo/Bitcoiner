@@ -13,7 +13,7 @@ trading_pairs:
 
 # リスク管理パラメータ
 risk_management:
-  max_position_size: 0.95       # ポジションサイズ上限（資産の95%）
+  max_position_size: 0.60       # ポジションサイズ上限（資産の60%）
   stop_loss_pct: 10.0           # ストップロス（10%損失で強制決済）
   max_drawdown_pct: 20.0        # 最大ドローダウン（20%）
   profit_taking_enabled: true   # 段階的利益確定を有効化
@@ -22,7 +22,7 @@ risk_management:
   max_daily_loss_pct: 5.0       # 日次最大損失
   max_weekly_loss_pct: 10.0     # 週次最大損失
   max_monthly_loss_pct: 15.0    # 月次最大損失
-  max_positions: 2              # 最大同時保有数
+  max_positions: 1              # 最大同時保有数（相関リスク低減のため1に変更）
   consecutive_loss_limit: 5     # 連続損失制限
 
 # ML設定

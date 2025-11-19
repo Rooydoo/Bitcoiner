@@ -12,7 +12,8 @@ cd "$(dirname "$0")/.."
 source venv/bin/activate
 
 # バックアップ実行
-echo "========================================" python scripts/backup_database.py --action backup --retention 30
+echo "=========================================="
+python scripts/backup_database.py --action backup --retention 30
 echo "=========================================="
 echo
 

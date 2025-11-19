@@ -112,7 +112,11 @@ class CryptoTrader:
             max_position_size=risk_config.get('max_position_size', 0.95),
             stop_loss_pct=risk_config.get('stop_loss_pct', 10.0),
             max_drawdown_pct=risk_config.get('max_drawdown_pct', 20.0),
-            profit_taking_enabled=risk_config.get('profit_taking_enabled', True)
+            profit_taking_enabled=risk_config.get('profit_taking_enabled', True),
+            consecutive_loss_limit=risk_config.get('consecutive_loss_limit', 5),
+            max_daily_loss_pct=risk_config.get('max_daily_loss_pct', 5.0),
+            max_weekly_loss_pct=risk_config.get('max_weekly_loss_pct', 10.0),
+            max_monthly_loss_pct=risk_config.get('max_monthly_loss_pct', 15.0)
         )
         logger.info("  ✓ 注文実行、ポジション管理、リスク管理モジュール初期化完了")
 
@@ -330,17 +334,8 @@ class CryptoTrader:
 
                 logger.info(f"  → 部分決済（第{level}段階）: {close_ratio:.0%}")
 
-                # Telegram通知（利益確定）
-                self.notifier.notify_take_profit(
-                    symbol,
-                    level=level,
-                    close_ratio=close_ratio,
-                    pnl_pct=unrealized_pnl_pct
-                )
-
-                # 第2段階（+25%）なら全決済
-                if level == 2:
-                    self._close_position(symbol, current_price, f"第{level}段階利益確定")
+                # 部分決済を実行
+                self._partial_close_position(symbol, current_price, close_ratio, level, unrealized_pnl_pct)
 
     def _enter_new_position(self, symbol: str, side: str, current_price: float, signal: Dict):
         """新規ポジションエントリー
@@ -352,6 +347,14 @@ class CryptoTrader:
             signal: シグナル情報
         """
         try:
+            # ポジション数制限チェック
+            max_positions = self.config.get('risk_management', {}).get('max_positions', 2)
+            current_positions = len(self.position_manager.get_all_positions())
+
+            if current_positions >= max_positions:
+                logger.info(f"  {symbol} エントリー見送り: 最大ポジション数到達（{current_positions}/{max_positions}）")
+                return
+
             # 資産情報取得
             balance = self.order_executor.get_balance('JPY')
             available_capital = balance['free']
@@ -418,6 +421,74 @@ class CryptoTrader:
             logger.error(f"{symbol} エントリーエラー: {e}")
             logger.error(traceback.format_exc())
 
+    def _partial_close_position(
+        self,
+        symbol: str,
+        exit_price: float,
+        close_ratio: float,
+        level: int,
+        unrealized_pnl_pct: float
+    ):
+        """ポジション部分決済
+
+        Args:
+            symbol: 取引ペア
+            exit_price: 決済価格
+            close_ratio: 決済比率（0.0-1.0）
+            level: 利益確定段階（1 or 2）
+            unrealized_pnl_pct: 未実現損益率
+        """
+        try:
+            position = self.position_manager.get_open_position(symbol)
+
+            if not position:
+                logger.warning(f"{symbol} 部分決済対象ポジションなし")
+                return
+
+            # 部分決済する数量を計算
+            partial_quantity = position.quantity * close_ratio
+
+            logger.info(f"  → 部分決済実行: {partial_quantity:.6f} {symbol} ({close_ratio:.0%})")
+
+            # 注文実行（部分決済）
+            order = self.order_executor.create_market_order(
+                symbol,
+                'sell' if position.side == 'long' else 'buy',
+                partial_quantity
+            )
+
+            if order and order['status'] in ['closed', 'filled']:
+                # ポジションマネージャーで部分決済処理
+                partial_info = self.position_manager.partial_close_position(
+                    symbol,
+                    exit_price,
+                    close_ratio
+                )
+
+                if partial_info:
+                    logger.info(f"  ✓ 部分決済成功（第{level}段階）")
+                    logger.info(f"    決済数量: {partial_info['partial_quantity']:.6f}")
+                    logger.info(f"    残存数量: {partial_info['remaining_quantity']:.6f}")
+                    logger.info(f"    部分損益: ¥{partial_info['partial_pnl']:,.0f} ({partial_info['partial_pnl_pct']:+.2f}%)")
+
+                    # リスク管理に取引結果を記録（部分決済）
+                    initial_capital = self.config.get('trading', {}).get('initial_capital', 200000)
+                    self.risk_manager.record_trade_result(partial_info['partial_pnl'], initial_capital)
+
+                    # Telegram通知
+                    self.notifier.notify_take_profit(
+                        symbol,
+                        level=level,
+                        close_ratio=close_ratio,
+                        pnl_pct=unrealized_pnl_pct
+                    )
+            else:
+                logger.error(f"  ✗ 部分決済注文失敗: {order}")
+
+        except Exception as e:
+            logger.error(f"{symbol} 部分決済エラー: {e}")
+            logger.error(traceback.format_exc())
+
     def _close_position(self, symbol: str, exit_price: float, reason: str):
         """ポジションクローズ
 
@@ -450,6 +521,13 @@ class CryptoTrader:
 
                     logger.info(f"  ✓ ポジションクローズ: {reason}")
                     logger.info(f"    実現損益: ¥{pnl:,.0f} ({pnl_pct:+.2f}%)")
+
+                    # リスク管理に取引結果を記録
+                    initial_capital = self.config.get('trading', {}).get('initial_capital', 200000)
+                    self.risk_manager.record_trade_result(pnl, initial_capital)
+
+                    # 利益確定トラッキングをリセット
+                    self.risk_manager.reset_profit_tracking(symbol)
 
                     # Telegram通知
                     self.notifier.notify_trade_close(
@@ -569,39 +647,86 @@ class CryptoTrader:
         last_daily_report_date = None
         last_health_check = datetime.now()
         cycle_count = 0
+        consecutive_api_errors = 0
+        max_consecutive_api_errors = 3
 
         try:
             while self.is_running:
-                # 取引サイクル実行
-                self.run_trading_cycle()
-                cycle_count += 1
+                try:
+                    # 取引サイクル実行
+                    self.run_trading_cycle()
+                    cycle_count += 1
 
-                # 日次レポート（1日1回）
-                today = datetime.now().date()
-                if last_daily_report_date != today:
-                    self.send_daily_report()
-                    last_daily_report_date = today
+                    # サイクル成功時にAPIエラーカウントをリセット
+                    if consecutive_api_errors > 0:
+                        logger.info(f"サイクル成功 - APIエラーカウントリセット（前回: {consecutive_api_errors}回）")
+                        consecutive_api_errors = 0
 
-                # 健全性チェック（1時間ごと）
-                if (datetime.now() - last_health_check).total_seconds() > 3600:
-                    logger.info("\n[定期健全性チェック]")
-                    is_healthy, issues, warnings = self.health_checker.run_all_checks()
+                    # 日次レポート（1日1回）
+                    today = datetime.now().date()
+                    if last_daily_report_date != today:
+                        self.send_daily_report()
+                        last_daily_report_date = today
 
-                    if not is_healthy:
-                        error_msg = "システムに問題が検出されました:\n" + "\n".join(issues)
-                        logger.error(error_msg)
-                        self.notifier.notify_error('健全性チェック失敗', error_msg)
+                    # 健全性チェック（1時間ごと）
+                    if (datetime.now() - last_health_check).total_seconds() > 3600:
+                        logger.info("\n[定期健全性チェック]")
+                        is_healthy, issues, warnings = self.health_checker.run_all_checks()
 
-                    last_health_check = datetime.now()
+                        if not is_healthy:
+                            error_msg = "システムに問題が検出されました:\n" + "\n".join(issues)
+                            logger.error(error_msg)
+                            self.notifier.notify_error('健全性チェック失敗', error_msg)
 
-                # パフォーマンスサマリー（10サイクルごと）
-                if cycle_count % 10 == 0 and self.performance_tracker:
-                    logger.info("\n[パフォーマンスサマリー]")
-                    self.performance_tracker.print_performance_report('all')
+                        last_health_check = datetime.now()
 
-                # 次のサイクルまで待機
-                logger.info(f"次のサイクルまで{interval_minutes}分待機...\n")
-                time.sleep(interval_minutes * 60)
+                    # パフォーマンスサマリー（10サイクルごと）
+                    if cycle_count % 10 == 0 and self.performance_tracker:
+                        logger.info("\n[パフォーマンスサマリー]")
+                        self.performance_tracker.print_performance_report('all')
+
+                    # 次のサイクルまで待機
+                    logger.info(f"次のサイクルまで{interval_minutes}分待機...\n")
+                    time.sleep(interval_minutes * 60)
+
+                except Exception as cycle_error:
+                    # サイクル内エラー処理
+                    error_str = str(cycle_error)
+                    is_api_error = any(keyword in error_str.lower() for keyword in [
+                        'api', 'network', 'connection', 'timeout', 'exchange', 'request'
+                    ])
+
+                    if is_api_error:
+                        consecutive_api_errors += 1
+                        logger.error(f"APIエラー発生（{consecutive_api_errors}/{max_consecutive_api_errors}回目）: {cycle_error}")
+
+                        # 連続APIエラー制限到達
+                        if consecutive_api_errors >= max_consecutive_api_errors:
+                            error_msg = (
+                                f"連続APIエラー制限到達（{consecutive_api_errors}回）\n"
+                                f"エラー: {cycle_error}\n"
+                                f"システムを安全に停止します"
+                            )
+                            logger.critical(error_msg)
+                            self.notifier.notify_error('緊急停止: API接続失敗', error_msg)
+
+                            # 安全なシャットダウン
+                            logger.info("安全なシャットダウンを開始します...")
+                            self.stop()
+                            break
+                        else:
+                            # リトライ前に待機（指数バックオフ）
+                            wait_time = 2 ** consecutive_api_errors  # 2, 4, 8秒
+                            logger.info(f"{wait_time}秒待機後にリトライします...")
+                            time.sleep(wait_time)
+                    else:
+                        # 非APIエラー
+                        logger.error(f"取引サイクルエラー: {cycle_error}")
+                        logger.error(traceback.format_exc())
+                        self.notifier.notify_error('取引サイクルエラー', str(cycle_error))
+
+                        # 1サイクルスキップして継続
+                        time.sleep(60)
 
         except KeyboardInterrupt:
             logger.info("\n中断シグナル受信 - シャットダウン中...")
