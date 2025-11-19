@@ -229,6 +229,18 @@ class PositionManager:
         """
         return self.open_positions.get(symbol)
 
+    def get_open_position(self, symbol: str) -> Optional[Position]:
+        """
+        オープンポジションを取得（get_positionのエイリアス）
+
+        Args:
+            symbol: 取引ペア
+
+        Returns:
+            Positionインスタンス（存在しない場合はNone）
+        """
+        return self.get_position(symbol)
+
     def has_position(self, symbol: str) -> bool:
         """
         ポジションを保有しているか

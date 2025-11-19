@@ -1,0 +1,611 @@
+"""メイン取引ボット - 全コンポーネント統合
+
+Phase 1-4の全機能を統合したメイントレーディングシステム
+"""
+
+import sys
+import time
+import traceback
+from pathlib import Path
+from datetime import datetime, timedelta
+from typing import Dict, Optional
+import pandas as pd
+import numpy as np
+
+# プロジェクトルートをパスに追加
+sys.path.insert(0, str(Path(__file__).parent))
+
+# Phase 1: Data Infrastructure
+from data.collector.bitflyer_api import BitflyerDataCollector
+from data.storage.sqlite_manager import SQLiteManager
+from data.processor.indicators import TechnicalIndicators
+
+# Phase 2: ML Models
+from ml.training.feature_engineering import FeatureEngineer
+from ml.models.hmm_model import MarketRegimeHMM
+from ml.models.lightgbm_model import PriceDirectionLGBM
+from ml.models.ensemble_model import EnsembleModel
+
+# Phase 3: Trading Engine
+from trading.order_executor import OrderExecutor
+from trading.position_manager import PositionManager
+from trading.risk_manager import RiskManager
+
+# Phase 4: Reporting & Notification
+from notification.telegram_notifier import TelegramNotifier
+from reporting.daily_report import ReportGenerator
+
+# Utils
+from utils.logger import setup_logger
+from utils.config_loader import ConfigLoader
+
+# ロガー設定
+logger = setup_logger('main_trader', 'main_trader.log', console=True)
+
+
+class CryptoTrader:
+    """暗号資産自動売買システム メインクラス"""
+
+    def __init__(
+        self,
+        config_path: str = "config/config.yaml",
+        test_mode: bool = True
+    ):
+        """
+        Args:
+            config_path: 設定ファイルパス
+            test_mode: テストモード（APIキーなしで動作）
+        """
+        self.test_mode = test_mode
+        logger.info("=" * 70)
+        logger.info("CryptoTrader 起動中...")
+        logger.info(f"モード: {'テスト' if test_mode else '本番'}")
+        logger.info("=" * 70)
+
+        # 設定読み込み
+        self.config = ConfigLoader(config_path)
+        self.trading_pairs = self.config.get('trading_pairs', [])
+
+        # Phase 1: データインフラ初期化
+        logger.info("\n[Phase 1] データインフラ初期化")
+        self.db_manager = SQLiteManager()
+        self.data_collector = BitflyerDataCollector()
+        self.indicators = TechnicalIndicators()
+        logger.info("  ✓ データベース、API、指標計算モジュール初期化完了")
+
+        # Phase 2: MLモデル初期化
+        logger.info("\n[Phase 2] MLモデル初期化")
+        self.feature_engineer = FeatureEngineer()
+        self.hmm_model = MarketRegimeHMM(n_states=3)
+        self.lgbm_model = PriceDirectionLGBM()
+        self.ensemble_model = EnsembleModel(self.hmm_model, self.lgbm_model)
+        logger.info("  ✓ 特徴量エンジニアリング、HMM、LightGBM、アンサンブルモデル初期化完了")
+
+        # Phase 3: 取引エンジン初期化
+        logger.info("\n[Phase 3] 取引エンジン初期化")
+        self.order_executor = OrderExecutor(test_mode=test_mode)
+        self.position_manager = PositionManager(self.db_manager)
+
+        risk_config = self.config.get('risk_management', {})
+        self.risk_manager = RiskManager(
+            max_position_size=risk_config.get('max_position_size', 0.95),
+            stop_loss_pct=risk_config.get('stop_loss_pct', 10.0),
+            max_drawdown_pct=risk_config.get('max_drawdown_pct', 20.0),
+            profit_taking_enabled=risk_config.get('profit_taking_enabled', True)
+        )
+        logger.info("  ✓ 注文実行、ポジション管理、リスク管理モジュール初期化完了")
+
+        # Phase 4: レポート・通知初期化
+        logger.info("\n[Phase 4] レポート・通知初期化")
+        telegram_config = self.config.get('telegram', {})
+        self.notifier = TelegramNotifier(
+            bot_token=telegram_config.get('bot_token'),
+            chat_id=telegram_config.get('chat_id'),
+            enabled=telegram_config.get('enabled', False)
+        )
+        self.report_generator = ReportGenerator(self.db_manager)
+        logger.info("  ✓ Telegram通知、レポート生成モジュール初期化完了")
+
+        # 状態管理
+        self.is_running = False
+        self.last_prediction_time = {}
+        self.models_loaded = False
+
+        logger.info("\n" + "=" * 70)
+        logger.info("CryptoTrader 初期化完了")
+        logger.info("=" * 70 + "\n")
+
+    def load_models(self):
+        """保存済みMLモデルを読み込み"""
+        logger.info("MLモデル読み込み中...")
+
+        try:
+            for pair_config in self.trading_pairs:
+                symbol = pair_config['symbol']
+
+                # HMMモデル読み込み
+                hmm_loaded = self.hmm_model.load_model(f'ml_models/hmm_{symbol.replace("/", "_")}.pkl')
+
+                # LightGBMモデル読み込み
+                lgbm_loaded = self.lgbm_model.load_model(f'ml_models/lgbm_{symbol.replace("/", "_")}.pkl')
+
+                if hmm_loaded and lgbm_loaded:
+                    logger.info(f"  ✓ {symbol} モデル読み込み成功")
+                else:
+                    logger.warning(f"  ⚠ {symbol} モデルが見つかりません（未学習）")
+
+            self.models_loaded = True
+            logger.info("MLモデル読み込み完了\n")
+            return True
+
+        except Exception as e:
+            logger.error(f"モデル読み込み失敗: {e}")
+            logger.warning("モデル未読み込みで続行します（予測は無効）\n")
+            return False
+
+    def collect_and_store_data(self, symbol: str, timeframe: str = '1m', limit: int = 500):
+        """データ収集とDB保存
+
+        Args:
+            symbol: 取引ペア
+            timeframe: 時間足
+            limit: 取得本数
+
+        Returns:
+            DataFrame or None
+        """
+        try:
+            # OHLCV取得
+            ohlcv_data = self.data_collector.fetch_ohlcv(symbol, timeframe, limit)
+
+            if ohlcv_data is None or len(ohlcv_data) == 0:
+                logger.warning(f"{symbol} データ取得失敗")
+                return None
+
+            df = pd.DataFrame(
+                ohlcv_data,
+                columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+            )
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+
+            # テクニカル指標計算
+            df = self.indicators.calculate_all_indicators(df)
+
+            # DB保存
+            for _, row in df.iterrows():
+                ohlcv_dict = {
+                    'timestamp': row['timestamp'].isoformat(),
+                    'symbol': symbol,
+                    'timeframe': timeframe,
+                    'open': row['open'],
+                    'high': row['high'],
+                    'low': row['low'],
+                    'close': row['close'],
+                    'volume': row['volume']
+                }
+                self.db_manager.insert_ohlcv(ohlcv_dict)
+
+            logger.info(f"  ✓ {symbol} データ収集・保存完了 ({len(df)}件)")
+            return df
+
+        except Exception as e:
+            logger.error(f"{symbol} データ収集エラー: {e}")
+            return None
+
+    def generate_trading_signal(self, symbol: str) -> Optional[Dict]:
+        """取引シグナル生成
+
+        Args:
+            symbol: 取引ペア
+
+        Returns:
+            シグナル情報 or None
+        """
+        if not self.models_loaded:
+            logger.debug(f"{symbol} モデル未読み込み - シグナル生成スキップ")
+            return None
+
+        try:
+            # 最新データ取得
+            df = self.collect_and_store_data(symbol, limit=500)
+
+            if df is None or len(df) < 100:
+                logger.warning(f"{symbol} データ不足")
+                return None
+
+            # 特徴量生成
+            df = self.feature_engineer.create_all_features(df)
+            df = df.dropna()
+
+            if len(df) == 0:
+                logger.warning(f"{symbol} 特徴量生成後データなし")
+                return None
+
+            # アンサンブルモデルで予測
+            signal = self.ensemble_model.generate_trading_signal(
+                df,
+                confidence_threshold=self.config.get('trading', {}).get('min_confidence', 0.6)
+            )
+
+            logger.info(f"  ✓ {symbol} シグナル: {signal['signal']} (信頼度: {signal['confidence']:.2%})")
+
+            return signal
+
+        except Exception as e:
+            logger.error(f"{symbol} シグナル生成エラー: {e}")
+            logger.error(traceback.format_exc())
+            return None
+
+    def execute_trading_decision(self, symbol: str, signal: Dict):
+        """取引判断と実行
+
+        Args:
+            symbol: 取引ペア
+            signal: シグナル情報
+        """
+        try:
+            # 現在価格取得
+            current_price = self.order_executor.get_current_price(symbol)
+
+            if current_price is None:
+                logger.warning(f"{symbol} 価格取得失敗")
+                return
+
+            # 既存ポジション確認
+            existing_position = self.position_manager.get_open_position(symbol)
+
+            # ========== ポジション保有中 ==========
+            if existing_position:
+                self._manage_existing_position(existing_position, current_price, signal)
+                return
+
+            # ========== 新規エントリー判定 ==========
+            if signal['signal'] == 'BUY':
+                self._enter_new_position(symbol, 'long', current_price, signal)
+            elif signal['signal'] == 'SELL':
+                self._enter_new_position(symbol, 'short', current_price, signal)
+            else:
+                logger.debug(f"{symbol} HOLD - エントリーなし")
+
+        except Exception as e:
+            logger.error(f"{symbol} 取引実行エラー: {e}")
+            logger.error(traceback.format_exc())
+            self.notifier.notify_error('取引実行エラー', str(e))
+
+    def _manage_existing_position(self, position, current_price: float, signal: Dict):
+        """既存ポジション管理
+
+        Args:
+            position: ポジションオブジェクト
+            current_price: 現在価格
+            signal: シグナル情報
+        """
+        symbol = position.symbol
+
+        # 未実現損益計算
+        unrealized_pnl = position.calculate_unrealized_pnl(current_price)
+        unrealized_pnl_pct = position.calculate_unrealized_pnl_pct(current_price)
+
+        logger.info(f"  {symbol} ポジション保有中: {position.side.upper()}")
+        logger.info(f"    未実現損益: ¥{unrealized_pnl:,.0f} ({unrealized_pnl_pct:+.2f}%)")
+
+        # リスク管理チェック
+        exit_action = self.risk_manager.get_exit_action(position, current_price)
+
+        if exit_action:
+            action = exit_action['action']
+            reason = exit_action['reason']
+
+            logger.info(f"  → {action}: {reason}")
+
+            # ストップロス or フル決済
+            if action in ['stop_loss', 'full_close']:
+                self._close_position(symbol, current_price, reason)
+
+            # 部分決済
+            elif action == 'partial_close':
+                close_ratio = exit_action['close_ratio']
+                level = exit_action.get('level', 1)
+
+                logger.info(f"  → 部分決済（第{level}段階）: {close_ratio:.0%}")
+
+                # Telegram通知（利益確定）
+                self.notifier.notify_take_profit(
+                    symbol,
+                    level=level,
+                    close_ratio=close_ratio,
+                    pnl_pct=unrealized_pnl_pct
+                )
+
+                # 第2段階（+25%）なら全決済
+                if level == 2:
+                    self._close_position(symbol, current_price, f"第{level}段階利益確定")
+
+    def _enter_new_position(self, symbol: str, side: str, current_price: float, signal: Dict):
+        """新規ポジションエントリー
+
+        Args:
+            symbol: 取引ペア
+            side: 'long' or 'short'
+            current_price: 現在価格
+            signal: シグナル情報
+        """
+        try:
+            # 資産情報取得
+            balance = self.order_executor.get_balance('JPY')
+            available_capital = balance['free']
+
+            # エントリー可否チェック
+            should_enter, reason = self.risk_manager.should_enter_trade(
+                signal_confidence=signal['confidence'],
+                min_confidence=self.config.get('trading', {}).get('min_confidence', 0.6),
+                current_equity=available_capital,
+                initial_capital=self.config.get('trading', {}).get('initial_capital', 200000)
+            )
+
+            if not should_enter:
+                logger.info(f"  {symbol} エントリー見送り: {reason}")
+                return
+
+            # ポジションサイズ計算
+            pair_config = next((p for p in self.trading_pairs if p['symbol'] == symbol), None)
+            allocation = pair_config['allocation'] if pair_config else 0.5
+
+            # 利用可能資本の割り当て（アロケーション × ポジションサイズ上限）
+            position_capital = available_capital * allocation
+            quantity = self.order_executor.calculate_position_size(
+                symbol,
+                position_capital,
+                position_ratio=self.risk_manager.max_position_size
+            )
+
+            if quantity <= 0:
+                logger.warning(f"  {symbol} ポジションサイズ不足")
+                return
+
+            # 注文実行
+            logger.info(f"  → 新規エントリー: {side.upper()} {quantity:.6f} {symbol} @ ¥{current_price:,.0f}")
+
+            order = self.order_executor.create_market_order(
+                symbol,
+                'buy' if side == 'long' else 'sell',
+                quantity
+            )
+
+            if order and order['status'] in ['closed', 'filled']:
+                # ポジション登録
+                position = self.position_manager.open_position(
+                    symbol=symbol,
+                    side=side,
+                    entry_price=current_price,
+                    quantity=quantity
+                )
+
+                logger.info(f"  ✓ エントリー成功: ポジションID={position.position_id}")
+
+                # Telegram通知
+                self.notifier.notify_trade_open(
+                    symbol,
+                    side,
+                    current_price,
+                    quantity
+                )
+            else:
+                logger.error(f"  ✗ 注文失敗: {order}")
+
+        except Exception as e:
+            logger.error(f"{symbol} エントリーエラー: {e}")
+            logger.error(traceback.format_exc())
+
+    def _close_position(self, symbol: str, exit_price: float, reason: str):
+        """ポジションクローズ
+
+        Args:
+            symbol: 取引ペア
+            exit_price: 決済価格
+            reason: 決済理由
+        """
+        try:
+            position = self.position_manager.get_open_position(symbol)
+
+            if not position:
+                logger.warning(f"{symbol} クローズ対象ポジションなし")
+                return
+
+            # 注文実行
+            order = self.order_executor.create_market_order(
+                symbol,
+                'sell' if position.side == 'long' else 'buy',
+                position.quantity
+            )
+
+            if order and order['status'] in ['closed', 'filled']:
+                # ポジションクローズ
+                closed_position = self.position_manager.close_position(symbol, exit_price)
+
+                if closed_position:
+                    pnl = closed_position.realized_pnl
+                    pnl_pct = closed_position.calculate_unrealized_pnl_pct(exit_price)
+
+                    logger.info(f"  ✓ ポジションクローズ: {reason}")
+                    logger.info(f"    実現損益: ¥{pnl:,.0f} ({pnl_pct:+.2f}%)")
+
+                    # Telegram通知
+                    self.notifier.notify_trade_close(
+                        symbol,
+                        position.side,
+                        position.entry_price,
+                        exit_price,
+                        position.quantity,
+                        pnl,
+                        pnl_pct
+                    )
+            else:
+                logger.error(f"  ✗ 決済注文失敗: {order}")
+
+        except Exception as e:
+            logger.error(f"{symbol} クローズエラー: {e}")
+            logger.error(traceback.format_exc())
+
+    def run_trading_cycle(self):
+        """1サイクルの取引処理"""
+        logger.info("\n" + "=" * 70)
+        logger.info(f"取引サイクル開始: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info("=" * 70)
+
+        try:
+            # 各取引ペアで処理
+            for pair_config in self.trading_pairs:
+                symbol = pair_config['symbol']
+
+                logger.info(f"\n[{symbol}] 処理開始")
+
+                # シグナル生成
+                signal = self.generate_trading_signal(symbol)
+
+                if signal:
+                    # 取引判断・実行
+                    self.execute_trading_decision(symbol, signal)
+                else:
+                    logger.debug(f"  {symbol} シグナルなし")
+
+            logger.info("\n" + "=" * 70)
+            logger.info("取引サイクル完了")
+            logger.info("=" * 70 + "\n")
+
+        except Exception as e:
+            logger.error(f"取引サイクルエラー: {e}")
+            logger.error(traceback.format_exc())
+            self.notifier.notify_error('取引サイクルエラー', str(e))
+
+    def send_daily_report(self):
+        """日次レポート送信"""
+        try:
+            logger.info("日次レポート生成中...")
+
+            # レポート生成
+            report = self.report_generator.generate_daily_report()
+            stats = self.report_generator.generate_summary_stats()
+
+            # 保有ポジション取得
+            open_positions = []
+            for pair_config in self.trading_pairs:
+                symbol = pair_config['symbol']
+                position = self.position_manager.get_open_position(symbol)
+
+                if position:
+                    current_price = self.order_executor.get_current_price(symbol)
+                    if current_price:
+                        open_positions.append({
+                            'symbol': symbol,
+                            'side': position.side,
+                            'unrealized_pnl': position.calculate_unrealized_pnl(current_price),
+                            'unrealized_pnl_pct': position.calculate_unrealized_pnl_pct(current_price)
+                        })
+
+            # Telegram送信
+            self.notifier.notify_daily_summary(
+                total_equity=stats.get('total_equity', 200000),
+                daily_pnl=stats.get('daily_pnl', 0),
+                daily_pnl_pct=stats.get('daily_pnl_pct', 0),
+                trades_count=stats.get('total_trades', 0),
+                win_rate=stats.get('win_rate', 0),
+                open_positions=open_positions
+            )
+
+            logger.info("  ✓ 日次レポート送信完了\n")
+
+        except Exception as e:
+            logger.error(f"日次レポート送信エラー: {e}")
+
+    def start(self, interval_minutes: int = 5):
+        """取引ボット開始
+
+        Args:
+            interval_minutes: 取引サイクル間隔（分）
+        """
+        logger.info("=" * 70)
+        logger.info("CryptoTrader 取引開始")
+        logger.info(f"サイクル間隔: {interval_minutes}分")
+        logger.info("=" * 70 + "\n")
+
+        # モデル読み込み
+        self.load_models()
+
+        self.is_running = True
+        last_daily_report_date = None
+
+        try:
+            while self.is_running:
+                # 取引サイクル実行
+                self.run_trading_cycle()
+
+                # 日次レポート（1日1回）
+                today = datetime.now().date()
+                if last_daily_report_date != today:
+                    self.send_daily_report()
+                    last_daily_report_date = today
+
+                # 次のサイクルまで待機
+                logger.info(f"次のサイクルまで{interval_minutes}分待機...\n")
+                time.sleep(interval_minutes * 60)
+
+        except KeyboardInterrupt:
+            logger.info("\n中断シグナル受信 - シャットダウン中...")
+            self.stop()
+        except Exception as e:
+            logger.error(f"予期しないエラー: {e}")
+            logger.error(traceback.format_exc())
+            self.notifier.notify_error('システムエラー', str(e))
+            self.stop()
+
+    def stop(self):
+        """取引ボット停止"""
+        logger.info("=" * 70)
+        logger.info("CryptoTrader 停止中...")
+        logger.info("=" * 70)
+
+        self.is_running = False
+
+        # 最終レポート生成
+        self.send_daily_report()
+
+        logger.info("\nCryptoTrader 停止完了\n")
+
+
+def main():
+    """メインエントリーポイント"""
+    import argparse
+
+    parser = argparse.ArgumentParser(description='CryptoTrader - 暗号資産自動売買システム')
+    parser.add_argument(
+        '--config',
+        type=str,
+        default='config/config.yaml',
+        help='設定ファイルパス'
+    )
+    parser.add_argument(
+        '--test',
+        action='store_true',
+        help='テストモード（APIキーなし）'
+    )
+    parser.add_argument(
+        '--interval',
+        type=int,
+        default=5,
+        help='取引サイクル間隔（分）'
+    )
+
+    args = parser.parse_args()
+
+    # トレーダー起動
+    trader = CryptoTrader(
+        config_path=args.config,
+        test_mode=args.test
+    )
+
+    trader.start(interval_minutes=args.interval)
+
+
+if __name__ == "__main__":
+    main()
