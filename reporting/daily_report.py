@@ -1,0 +1,276 @@
+"""レポート生成モジュール
+
+日次/週次/月次レポートを定型フォーマットで生成
+"""
+
+import logging
+from typing import Dict, List, Optional
+from datetime import datetime, timedelta
+from data.storage.sqlite_manager import SQLiteManager
+
+logger = logging.getLogger(__name__)
+
+
+class ReportGenerator:
+    """レポート生成クラス"""
+
+    def __init__(self, db_manager: SQLiteManager):
+        """
+        Args:
+            db_manager: SQLiteManagerインスタンス
+        """
+        self.db_manager = db_manager
+        logger.info("レポート生成システム初期化")
+
+    def generate_daily_report(self, date: Optional[datetime] = None) -> str:
+        """
+        日次レポートを生成
+
+        Args:
+            date: 対象日（Noneの場合は今日）
+
+        Returns:
+            レポートテキスト
+        """
+        if date is None:
+            date = datetime.now()
+
+        date_str = date.strftime('%Y-%m-%d')
+
+        # 日次データ取得（DBから）
+        # TODO: 実際のDB取得ロジック実装
+        daily_data = self._get_daily_data(date)
+
+        report = f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【日次レポート】{date_str}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+【資産状況】
+総資産: ¥{daily_data['total_equity']:,.0f}
+前日比: ¥{daily_data['daily_pnl']:,.0f} ({daily_data['daily_pnl_pct']:+.2f}%)
+初期資金: ¥{daily_data['initial_capital']:,.0f}
+総損益: ¥{daily_data['total_pnl']:,.0f} ({daily_data['total_pnl_pct']:+.2f}%)
+
+【取引実績】
+取引回数: {daily_data['trades_count']}回
+勝ち: {daily_data['winning_trades']}回
+負け: {daily_data['losing_trades']}回
+勝率: {daily_data['win_rate']:.1%}
+
+平均利益: ¥{daily_data['avg_win']:,.0f}
+平均損失: ¥{daily_data['avg_loss']:,.0f}
+プロフィット率: {daily_data['profit_factor']:.2f}
+
+【保有ポジション】
+"""
+
+        if daily_data['open_positions']:
+            for pos in daily_data['open_positions']:
+                report += f"""
+• {pos['symbol']} {pos['side'].upper()}
+  エントリー: ¥{pos['entry_price']:,.0f}
+  現在価格: ¥{pos['current_price']:,.0f}
+  数量: {pos['quantity']:.6f}
+  未実現損益: ¥{pos['unrealized_pnl']:,.0f} ({pos['unrealized_pnl_pct']:+.2f}%)
+  保有時間: {pos['holding_hours']:.1f}時間
+"""
+        else:
+            report += "\nなし\n"
+
+        report += f"""
+【本日の取引】
+"""
+
+        if daily_data['today_trades']:
+            for i, trade in enumerate(daily_data['today_trades'], 1):
+                pnl_emoji = "📈" if trade['pnl'] > 0 else "📉"
+                report += f"""
+{i}. {trade['symbol']} {trade['side'].upper()}
+   {pnl_emoji} 損益: ¥{trade['pnl']:,.0f} ({trade['pnl_pct']:+.2f}%)
+   {trade['entry_time']} → {trade['exit_time']}
+"""
+        else:
+            report += "\nなし\n"
+
+        report += f"""
+【リスク指標】
+最大ドローダウン: {daily_data['max_drawdown_pct']:.2f}%
+シャープレシオ: {daily_data['sharpe_ratio']:.2f}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+
+        logger.info(f"日次レポート生成完了: {date_str}")
+        return report.strip()
+
+    def generate_weekly_report(self, end_date: Optional[datetime] = None) -> str:
+        """
+        週次レポートを生成
+
+        Args:
+            end_date: 終了日（Noneの場合は今日）
+
+        Returns:
+            レポートテキスト
+        """
+        if end_date is None:
+            end_date = datetime.now()
+
+        start_date = end_date - timedelta(days=7)
+
+        period_str = f"{start_date.strftime('%Y-%m-%d')} ~ {end_date.strftime('%Y-%m-%d')}"
+
+        # 週次データ取得
+        weekly_data = self._get_weekly_data(start_date, end_date)
+
+        report = f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【週次レポート】{period_str}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+【資産状況】
+総資産: ¥{weekly_data['total_equity']:,.0f}
+週次損益: ¥{weekly_data['weekly_pnl']:,.0f} ({weekly_data['weekly_pnl_pct']:+.2f}%)
+総損益: ¥{weekly_data['total_pnl']:,.0f} ({weekly_data['total_pnl_pct']:+.2f}%)
+
+【取引実績】
+取引回数: {weekly_data['trades_count']}回
+勝ち: {weekly_data['winning_trades']}回
+負け: {weekly_data['losing_trades']}回
+勝率: {weekly_data['win_rate']:.1%}
+
+総利益: ¥{weekly_data['total_profit']:,.0f}
+総損失: ¥{weekly_data['total_loss']:,.0f}
+プロフィット率: {weekly_data['profit_factor']:.2f}
+
+平均保有時間: {weekly_data['avg_holding_hours']:.1f}時間
+
+【日別損益】
+"""
+
+        for day_pnl in weekly_data['daily_pnl_list']:
+            emoji = "📈" if day_pnl['pnl'] > 0 else "📉" if day_pnl['pnl'] < 0 else "➖"
+            report += f"{day_pnl['date']}: {emoji} ¥{day_pnl['pnl']:,.0f}\n"
+
+        report += f"""
+【リスク指標】
+最大ドローダウン: {weekly_data['max_drawdown_pct']:.2f}%
+シャープレシオ: {weekly_data['sharpe_ratio']:.2f}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+
+        logger.info(f"週次レポート生成完了: {period_str}")
+        return report.strip()
+
+    def generate_summary_stats(self) -> Dict:
+        """
+        統計サマリーを生成
+
+        Returns:
+            統計情報の辞書
+        """
+        # TODO: 実際のDB取得ロジック
+        stats = {
+            'total_trades': 10,
+            'winning_trades': 7,
+            'losing_trades': 3,
+            'win_rate': 0.7,
+            'total_pnl': 10000,
+            'total_pnl_pct': 5.0,
+            'avg_win': 2000,
+            'avg_loss': -1000,
+            'profit_factor': 2.0,
+            'max_drawdown_pct': 5.0,
+            'sharpe_ratio': 1.5,
+            'avg_holding_hours': 12.5
+        }
+
+        return stats
+
+    def _get_daily_data(self, date: datetime) -> Dict:
+        """日次データを取得（モック）"""
+        # TODO: 実際のDB取得ロジック実装
+        return {
+            'total_equity': 205000,
+            'daily_pnl': 5000,
+            'daily_pnl_pct': 2.5,
+            'initial_capital': 200000,
+            'total_pnl': 5000,
+            'total_pnl_pct': 2.5,
+            'trades_count': 2,
+            'winning_trades': 2,
+            'losing_trades': 0,
+            'win_rate': 1.0,
+            'avg_win': 2500,
+            'avg_loss': 0,
+            'profit_factor': 0,
+            'open_positions': [],
+            'today_trades': [
+                {
+                    'symbol': 'BTC/JPY',
+                    'side': 'long',
+                    'pnl': 3000,
+                    'pnl_pct': 2.5,
+                    'entry_time': '09:00',
+                    'exit_time': '15:00'
+                },
+                {
+                    'symbol': 'ETH/JPY',
+                    'side': 'long',
+                    'pnl': 2000,
+                    'pnl_pct': 2.0,
+                    'entry_time': '10:00',
+                    'exit_time': '16:00'
+                }
+            ],
+            'max_drawdown_pct': 3.0,
+            'sharpe_ratio': 1.2
+        }
+
+    def _get_weekly_data(self, start_date: datetime, end_date: datetime) -> Dict:
+        """週次データを取得（モック）"""
+        # TODO: 実際のDB取得ロジック実装
+        daily_pnl_list = []
+        current_date = start_date
+
+        while current_date <= end_date:
+            daily_pnl_list.append({
+                'date': current_date.strftime('%Y-%m-%d'),
+                'pnl': 1000 if current_date.weekday() < 5 else 0
+            })
+            current_date += timedelta(days=1)
+
+        return {
+            'total_equity': 210000,
+            'weekly_pnl': 10000,
+            'weekly_pnl_pct': 5.0,
+            'total_pnl': 10000,
+            'total_pnl_pct': 5.0,
+            'trades_count': 10,
+            'winning_trades': 7,
+            'losing_trades': 3,
+            'win_rate': 0.7,
+            'total_profit': 14000,
+            'total_loss': 4000,
+            'profit_factor': 3.5,
+            'avg_holding_hours': 15.0,
+            'daily_pnl_list': daily_pnl_list,
+            'max_drawdown_pct': 5.0,
+            'sharpe_ratio': 1.5
+        }
+
+
+# ヘルパー関数
+def create_report_generator(db_manager: SQLiteManager) -> ReportGenerator:
+    """
+    レポート生成インスタンスを作成
+
+    Args:
+        db_manager: SQLiteManagerインスタンス
+
+    Returns:
+        ReportGeneratorインスタンス
+    """
+    return ReportGenerator(db_manager)
