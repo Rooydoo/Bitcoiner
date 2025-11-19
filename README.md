@@ -15,7 +15,7 @@
 
 **実装済みコンポーネント**:
 - ✅ SQLiteデータベーススキーマ（price_data.db, trades.db, ml_models.db）
-- ✅ Binance API連携モジュール（ccxt）
+- ✅ bitFlyer API連携モジュール（ccxt）- 円建て取引対応
 - ✅ 技術指標計算モジュール（20種類以上）
   - トレンド系: SMA, EMA, MACD, ADX
   - オシレーター系: RSI, Stochastic, CCI
@@ -108,7 +108,7 @@ crypto_trader/
 │   └── risk_params.yaml         # リスク管理パラメータ
 ├── data/                        # データ収集・処理
 │   ├── collector/               # データ収集
-│   │   ├── binance_api.py       # Binance API連携
+│   │   ├── bitflyer_api.py      # bitFlyer API連携（円建て）
 │   │   └── data_orchestrator.py # データ収集統合
 │   ├── processor/               # データ処理
 │   │   └── indicators.py        # 技術指標計算
@@ -147,7 +147,7 @@ crypto_trader/
 
 - **言語**: Python 3.10+
 - **データベース**: SQLite 3.x
-- **取引所API**: ccxt（Binance）
+- **取引所API**: ccxt（bitFlyer）- 円建て取引
 - **機械学習**: scikit-learn, LightGBM, hmmlearn（Phase 2）
 - **通知**: python-telegram-bot（Phase 4）
 - **UI**: Streamlit（Phase 4）

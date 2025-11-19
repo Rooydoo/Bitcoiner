@@ -2,14 +2,13 @@
 
 # 取引所設定
 exchange:
-  name: binance
-  use_testnet: false  # 本番運用時はfalse
-  
-# 取引対象通貨
+  name: bitflyer
+
+# 取引対象通貨（円建て）
 trading_pairs:
-  - symbol: BTC/USDT
+  - symbol: BTC/JPY
     allocation: 0.6  # 60%
-  - symbol: ETH/USDT
+  - symbol: ETH/JPY
     allocation: 0.4  # 40%
 
 # リスク管理パラメータ

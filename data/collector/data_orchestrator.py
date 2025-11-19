@@ -6,7 +6,7 @@ from typing import List, Dict
 import pandas as pd
 import time
 
-from data.collector.binance_api import BinanceDataCollector
+from data.collector.bitflyer_api import BitflyerDataCollector
 from data.storage.sqlite_manager import get_db_manager
 from data.processor.indicators import TechnicalIndicators
 
@@ -21,10 +21,10 @@ class DataCollectionOrchestrator:
         初期化
 
         Args:
-            symbols: 取引ペアのリスト（例: ['BTC/USDT', 'ETH/USDT']）
+            symbols: 取引ペアのリスト（例: ['BTC/JPY', 'ETH/JPY']）
         """
-        self.symbols = symbols or ['BTC/USDT', 'ETH/USDT']
-        self.collector = BinanceDataCollector()
+        self.symbols = symbols or ['BTC/JPY', 'ETH/JPY']
+        self.collector = BitflyerDataCollector()
         self.db = get_db_manager()
         self.ti = TechnicalIndicators()
 
@@ -78,7 +78,7 @@ class DataCollectionOrchestrator:
         symbol: str,
         timeframe: str,
         days: int = 730,  # 2年分
-        batch_size: int = 1000
+        batch_size: int = 500  # bitFlyerは500が上限
     ) -> int:
         """
         過去データを大量取得してDBに保存
@@ -146,8 +146,8 @@ class DataCollectionOrchestrator:
                 count = self.collect_and_store_ohlcv(symbol, timeframe, limit=100)
                 results[key] = count
 
-                # レート制限対策
-                time.sleep(0.2)
+                # レート制限対策（bitFlyerは厳しい）
+                time.sleep(0.5)
 
         logger.info(f"全通貨ペアデータ収集完了: {sum(results.values())}件")
         return results
