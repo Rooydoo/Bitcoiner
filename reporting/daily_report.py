@@ -164,6 +164,77 @@ class ReportGenerator:
         logger.info(f"週次レポート生成完了: {period_str}")
         return report.strip()
 
+    def generate_monthly_report(self, end_date: Optional[datetime] = None) -> str:
+        """
+        月次レポートを生成
+
+        Args:
+            end_date: 終了日（Noneの場合は今日）
+
+        Returns:
+            レポートテキスト
+        """
+        if end_date is None:
+            end_date = datetime.now()
+
+        # 月初を計算
+        start_date = end_date.replace(day=1)
+
+        period_str = f"{start_date.strftime('%Y-%m-%d')} ~ {end_date.strftime('%Y-%m-%d')}"
+        month_str = end_date.strftime('%Y年%m月')
+
+        # 月次データ取得
+        monthly_data = self._get_monthly_data(start_date, end_date)
+
+        report = f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【月次レポート】{month_str}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+【資産状況】
+総資産: ¥{monthly_data['total_equity']:,.0f}
+月次損益: ¥{monthly_data['monthly_pnl']:,.0f} ({monthly_data['monthly_pnl_pct']:+.2f}%)
+総損益: ¥{monthly_data['total_pnl']:,.0f} ({monthly_data['total_pnl_pct']:+.2f}%)
+
+【取引実績】
+取引回数: {monthly_data['trades_count']}回
+勝ち: {monthly_data['winning_trades']}回
+負け: {monthly_data['losing_trades']}回
+勝率: {monthly_data['win_rate']:.1%}
+
+総利益: ¥{monthly_data['total_profit']:,.0f}
+総損失: ¥{monthly_data['total_loss']:,.0f}
+プロフィット率: {monthly_data['profit_factor']:.2f}
+
+平均保有時間: {monthly_data['avg_holding_hours']:.1f}時間
+
+【週別損益】
+"""
+
+        for week_pnl in monthly_data['weekly_pnl_list']:
+            emoji = "📈" if week_pnl['pnl'] > 0 else "📉" if week_pnl['pnl'] < 0 else "➖"
+            report += f"第{week_pnl['week']}週: {emoji} ¥{week_pnl['pnl']:,.0f} ({week_pnl['pnl_pct']:+.2f}%)\n"
+
+        report += f"""
+【リスク指標】
+最大ドローダウン: {monthly_data['max_drawdown_pct']:.2f}%
+シャープレシオ: {monthly_data['sharpe_ratio']:.2f}
+ボラティリティ: {monthly_data['volatility']:.2f}%
+
+【ベストトレード】
+{monthly_data['best_trade']['symbol']} {monthly_data['best_trade']['side'].upper()}
+損益: ¥{monthly_data['best_trade']['pnl']:,.0f} ({monthly_data['best_trade']['pnl_pct']:+.2f}%)
+
+【ワーストトレード】
+{monthly_data['worst_trade']['symbol']} {monthly_data['worst_trade']['side'].upper()}
+損益: ¥{monthly_data['worst_trade']['pnl']:,.0f} ({monthly_data['worst_trade']['pnl_pct']:+.2f}%)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+
+        logger.info(f"月次レポート生成完了: {period_str}")
+        return report.strip()
+
     def generate_summary_stats(self) -> Dict:
         """
         統計サマリーを生成
@@ -259,6 +330,50 @@ class ReportGenerator:
             'daily_pnl_list': daily_pnl_list,
             'max_drawdown_pct': 5.0,
             'sharpe_ratio': 1.5
+        }
+
+    def _get_monthly_data(self, start_date: datetime, end_date: datetime) -> Dict:
+        """月次データを取得（モック）"""
+        # TODO: 実際のDB取得ロジック実装
+        weekly_pnl_list = []
+
+        for week in range(1, 5):
+            weekly_pnl_list.append({
+                'week': week,
+                'pnl': 5000 + (week * 1000),
+                'pnl_pct': 2.5 + (week * 0.5)
+            })
+
+        return {
+            'total_equity': 230000,
+            'monthly_pnl': 30000,
+            'monthly_pnl_pct': 15.0,
+            'total_pnl': 30000,
+            'total_pnl_pct': 15.0,
+            'trades_count': 40,
+            'winning_trades': 28,
+            'losing_trades': 12,
+            'win_rate': 0.7,
+            'total_profit': 50000,
+            'total_loss': 20000,
+            'profit_factor': 2.5,
+            'avg_holding_hours': 18.0,
+            'weekly_pnl_list': weekly_pnl_list,
+            'max_drawdown_pct': 8.0,
+            'sharpe_ratio': 1.8,
+            'volatility': 12.5,
+            'best_trade': {
+                'symbol': 'BTC/JPY',
+                'side': 'long',
+                'pnl': 15000,
+                'pnl_pct': 12.5
+            },
+            'worst_trade': {
+                'symbol': 'ETH/JPY',
+                'side': 'short',
+                'pnl': -5000,
+                'pnl_pct': -4.2
+            }
         }
 
 

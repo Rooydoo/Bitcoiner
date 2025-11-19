@@ -577,10 +577,21 @@ class CryptoTrader:
             logger.error(traceback.format_exc())
             self.notifier.notify_error('取引サイクルエラー', str(e))
 
-    def send_daily_report(self):
-        """日次レポート送信"""
+    def send_daily_report(self, report_type: str = "evening"):
+        """定時レポート送信
+
+        Args:
+            report_type: レポート種別（morning/noon/evening）
+        """
         try:
-            logger.info("日次レポート生成中...")
+            type_labels = {
+                'morning': '朝の',
+                'noon': '昼の',
+                'evening': '夜の'
+            }
+            label = type_labels.get(report_type, '')
+
+            logger.info(f"{label}レポート生成中...")
 
             # レポート生成
             report = self.report_generator.generate_daily_report()
@@ -612,10 +623,44 @@ class CryptoTrader:
                 open_positions=open_positions
             )
 
-            logger.info("  ✓ 日次レポート送信完了\n")
+            logger.info(f"  ✓ {label}レポート送信完了\n")
 
         except Exception as e:
-            logger.error(f"日次レポート送信エラー: {e}")
+            logger.error(f"{label}レポート送信エラー: {e}")
+
+    def send_weekly_report(self):
+        """週次レポート送信"""
+        try:
+            logger.info("週次レポート生成中...")
+
+            # 週次レポート生成
+            report = self.report_generator.generate_weekly_report()
+
+            # Telegramに送信（テキストとして）
+            if self.notifier.enabled:
+                self.notifier.send_message(report)
+
+            logger.info("  ✓ 週次レポート送信完了\n")
+
+        except Exception as e:
+            logger.error(f"週次レポート送信エラー: {e}")
+
+    def send_monthly_report(self):
+        """月次レポート送信"""
+        try:
+            logger.info("月次レポート生成中...")
+
+            # 月次レポート生成
+            report = self.report_generator.generate_monthly_report()
+
+            # Telegramに送信（テキストとして）
+            if self.notifier.enabled:
+                self.notifier.send_message(report)
+
+            logger.info("  ✓ 月次レポート送信完了\n")
+
+        except Exception as e:
+            logger.error(f"月次レポート送信エラー: {e}")
 
     def start(self, interval_minutes: int = 5):
         """取引ボット開始
@@ -644,11 +689,29 @@ class CryptoTrader:
         self.load_models()
 
         self.is_running = True
-        last_daily_report_date = None
         last_health_check = datetime.now()
         cycle_count = 0
         consecutive_api_errors = 0
         max_consecutive_api_errors = 3
+
+        # レポート送信済みフラグ
+        sent_reports = {
+            'morning': None,  # 最後に送信した日付
+            'noon': None,
+            'evening': None,
+            'weekly': None,
+            'monthly': None
+        }
+
+        # レポート設定取得
+        reporting_config = self.config.get('reporting', {})
+        morning_time = reporting_config.get('morning_report_time', '07:00')
+        noon_time = reporting_config.get('noon_report_time', '13:00')
+        evening_time = reporting_config.get('evening_report_time', '22:00')
+        weekly_day = reporting_config.get('weekly_report_day', 0)  # 月曜
+        weekly_time = reporting_config.get('weekly_report_time', '22:00')
+        monthly_day = reporting_config.get('monthly_report_day', -1)  # 月末
+        monthly_time = reporting_config.get('monthly_report_time', '22:00')
 
         try:
             while self.is_running:
@@ -662,11 +725,40 @@ class CryptoTrader:
                         logger.info(f"サイクル成功 - APIエラーカウントリセット（前回: {consecutive_api_errors}回）")
                         consecutive_api_errors = 0
 
-                    # 日次レポート（1日1回）
-                    today = datetime.now().date()
-                    if last_daily_report_date != today:
-                        self.send_daily_report()
-                        last_daily_report_date = today
+                    # 定時レポートチェック（1日3回）
+                    now = datetime.now()
+                    today = now.date()
+                    current_time = now.strftime('%H:%M')
+
+                    # 朝のレポート
+                    if current_time >= morning_time and sent_reports['morning'] != today:
+                        self.send_daily_report('morning')
+                        sent_reports['morning'] = today
+
+                    # 昼のレポート
+                    if current_time >= noon_time and sent_reports['noon'] != today:
+                        self.send_daily_report('noon')
+                        sent_reports['noon'] = today
+
+                    # 夜のレポート
+                    if current_time >= evening_time and sent_reports['evening'] != today:
+                        self.send_daily_report('evening')
+                        sent_reports['evening'] = today
+
+                    # 週次レポート（指定曜日の指定時刻）
+                    if now.weekday() == weekly_day and current_time >= weekly_time:
+                        if sent_reports['weekly'] != today:
+                            self.send_weekly_report()
+                            sent_reports['weekly'] = today
+
+                    # 月次レポート（月末の指定時刻）
+                    # 月末判定: 翌日が1日の場合
+                    is_last_day_of_month = (now + timedelta(days=1)).day == 1
+                    if is_last_day_of_month and current_time >= monthly_time:
+                        # 月が変わったかチェック（同じ月に複数回送信しない）
+                        if sent_reports['monthly'] != today:
+                            self.send_monthly_report()
+                            sent_reports['monthly'] = today
 
                     # 健全性チェック（1時間ごと）
                     if (datetime.now() - last_health_check).total_seconds() > 3600:

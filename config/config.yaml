@@ -39,6 +39,10 @@ reporting:
   morning_report_time: "07:00"
   noon_report_time: "13:00"
   evening_report_time: "22:00"
+  weekly_report_day: 0        # 週次レポート曜日（0=月曜, 6=日曜）
+  weekly_report_time: "22:00"  # 週次レポート時刻
+  monthly_report_day: -1       # 月次レポート日（-1=月末）
+  monthly_report_time: "22:00" # 月次レポート時刻
   
 # 取引設定
 trading:
