@@ -43,7 +43,8 @@
 
 ### 📈 Phase 4: レポート・通知
 - **Telegram Bot通知** - 取引通知、日次サマリー、アラート
-- **レポート生成** - 日次/週次レポート（定型フォーマット）
+- **Telegram Botコマンド** - 双方向制御（/status, /pause, /resume等）
+- **レポート生成** - 日次3回 + 週次 + 月次レポート
 - **税務処理** - CSVエクスポート、年間損益計算
 
 ### 🚀 Phase 5: 統合・デプロイ
@@ -51,6 +52,20 @@
 - **設定管理** - YAML + 環境変数
 - **起動スクリプト** - 仮想環境自動セットアップ
 - **統合テスト** - エンドツーエンドテスト
+
+### 🤖 Phase 6: AI戦略最適化（New!）
+- **LLM戦略アドバイザー** - Claude Sonnet 4.5による高度な分析
+- **自動パラメータ調整提案** - 損切/利確ライン、資産配分の最適化
+- **週次・月次パフォーマンス分析** - 勝率、PF、Sharpe Ratio等
+- **ルールベースフォールバック** - API障害時も安全動作
+
+### 🛡️ 高度なリスク管理（New!）
+- **部分決済** - +15%で50%決済、+25%で全決済（MUST機能）
+- **連続損失制限** - 5連敗で自動一時停止
+- **期間別損失制限** - 日次5%, 週次10%, 月次15%
+- **ポジション数制限** - 最大1ポジション（相関リスク低減）
+- **API障害検知** - 3連続エラーで安全停止
+- **Telegram経由制御** - 外出先から一時停止/再開可能
 
 ## 🏗 システム構成
 
@@ -142,8 +157,20 @@ BITFLYER_API_KEY=your_api_key_here
 BITFLYER_API_SECRET=your_api_secret_here
 
 # Telegram Bot（通知機能を使う場合）
+# ボット作成: @BotFather で新規Bot作成
+# Chat ID取得: @userinfobot でChat ID確認
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 TELEGRAM_CHAT_ID=your_chat_id_here
+
+# Anthropic API（LLM戦略アドバイザーを使う場合 - オプション）
+# https://console.anthropic.com/ でAPIキー取得
+ANTHROPIC_API_KEY=your_anthropic_api_key_here
+```
+
+**⚠️ 重要:** 本番運用時は必ず以下を設定してください：
+- `BITFLYER_API_KEY` / `BITFLYER_API_SECRET` （必須）
+- `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` （強く推奨 - 緊急通知用）
+- `ANTHROPIC_API_KEY` （オプション - LLM戦略分析を使う場合）
 ```
 
 **Telegram Bot設定手順:**
@@ -151,7 +178,34 @@ TELEGRAM_CHAT_ID=your_chat_id_here
 2. `/newbot` でBot作成 → トークン取得
 3. [@userinfobot](https://t.me/userinfobot) でChat ID確認
 
-### 5. 設定ファイルの確認
+### 5. パッケージインストール確認
+
+以下のコマンドで必須パッケージがインストールされているか確認：
+
+```bash
+# 仮想環境が有効化されていることを確認
+source venv/bin/activate  # Linux/macOS
+# または
+venv\Scripts\activate  # Windows
+
+# 重要パッケージの確認
+pip list | grep -E "anthropic|python-telegram-bot|ccxt|lightgbm"
+```
+
+**期待される出力:**
+```
+anthropic          0.40.0以上
+ccxt               4.1.40以上
+lightgbm           4.1.0以上
+python-telegram-bot 20.6
+```
+
+**パッケージが見つからない場合:**
+```bash
+pip install -r requirements.txt
+```
+
+### 6. 設定ファイルの確認
 
 `config/config.yaml` を確認・必要に応じて編集:
 
@@ -238,6 +292,48 @@ python main_trader.py --help
   --test           テストモード（APIキーなし）
   --interval N     取引サイクル間隔（分、デフォルト: 5）
 ```
+
+### Telegram Botコマンド（リモート制御）
+
+システム稼働中、Telegramアプリから以下のコマンドでシステムを制御できます：
+
+```
+📊 情報取得
+/status          - システム状態（稼働中/停止、残高、ポジション）
+/positions       - 保有ポジション詳細
+/config          - 現在の設定表示
+
+⚙️ 制御
+/pause           - 取引一時停止（新規エントリー停止）
+/resume          - 取引再開（連続損失カウントリセット）
+
+🔧 設定変更
+/set_stop_loss 8.0   - 損切ラインを8.0%に変更
+                       (config.yaml自動更新 + バックアップ作成)
+
+❓ その他
+/commands        - コマンド一覧（簡潔版）
+/help            - 詳細ヘルプ
+```
+
+**使用例:**
+```
+あなた: /status
+
+Bot: 📊 システム状態
+     🟢 稼働中
+     ▶️ アクティブ
+     💰 残高: ¥200,000
+     📈 ポジション: 1件
+     • BTC/JPY LONG: +5.2%
+
+あなた: /pause
+
+Bot: ⏸️ 取引を一時停止しました
+     再開するには: /resume
+```
+
+**💡 ヒント:** チャット入力欄で「/」を入力すると、コマンド候補が自動表示されます
 
 ## ⚠️ リスク管理
 
