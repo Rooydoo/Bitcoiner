@@ -53,6 +53,8 @@ class BitflyerDataCollector:
         """
         ローソク足データを取得
 
+        注意: bitFlyerはfetchOHLCV()未サポートのため、fetch_trades()からOHLCVを構築
+
         Args:
             symbol: 通貨ペア（例: 'BTC/JPY'）
             timeframe: 時間足（'1m', '5m', '1h', '1d'など）
@@ -68,16 +70,61 @@ class BitflyerDataCollector:
                 logger.warning(f"bitFlyerのlimit上限は500です。{limit}を500に調整します")
                 limit = 500
 
-            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+            # bitFlyerはfetchOHLCV未サポート -> fetch_trades()からOHLCVを構築
+            logger.info(f"fetch_trades()から{timeframe}のOHLCVを構築します")
 
-            if not ohlcv:
-                logger.warning(f"データなし: {symbol} {timeframe}")
+            # 約定履歴を取得
+            trades = self.exchange.fetch_trades(symbol, since=since, limit=1000)
+
+            if not trades:
+                logger.warning(f"約定データなし: {symbol}")
                 return pd.DataFrame()
 
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            # 約定データをDataFrameに変換
+            trades_df = pd.DataFrame([
+                {
+                    'timestamp': t['timestamp'],
+                    'price': t['price'],
+                    'amount': t['amount']
+                }
+                for t in trades
+            ])
 
-            # タイムスタンプをUnix秒に変換（DBと整合性を保つ）
-            df['timestamp'] = (df['timestamp'] / 1000).astype(int)
+            # タイムスタンプを秒単位に変換
+            trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'], unit='ms')
+
+            # タイムフレームに応じてリサンプリング
+            timeframe_map = {
+                '1m': '1T',
+                '5m': '5T',
+                '15m': '15T',
+                '1h': '1H',
+                '4h': '4H',
+                '1d': '1D'
+            }
+
+            resample_freq = timeframe_map.get(timeframe, '1T')
+
+            # OHLCVを構築
+            trades_df.set_index('timestamp', inplace=True)
+            ohlcv_df = trades_df['price'].resample(resample_freq).ohlc()
+            ohlcv_df['volume'] = trades_df['amount'].resample(resample_freq).sum()
+
+            # NaNを前方埋め
+            ohlcv_df = ohlcv_df.ffill().dropna()
+
+            # インデックスをリセット
+            ohlcv_df.reset_index(inplace=True)
+
+            # limit件数に調整
+            if len(ohlcv_df) > limit:
+                ohlcv_df = ohlcv_df.tail(limit)
+
+            # カラム順を整理
+            df = ohlcv_df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].copy()
+
+            # タイムスタンプをdatetimeオブジェクトからUnix秒に変換
+            df['timestamp'] = df['timestamp'].astype(int) // 10**9
 
             logger.debug(f"OHLCV取得: {symbol} {timeframe} ({len(df)}件)")
             return df

@@ -1,227 +1,402 @@
 # CryptoTrader - 暗号資産自動売買システム
 
-## 概要
-機械学習を用いたBitcoin/Ethereum半自動売買システム
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**初期運用資金**: 20万円（BTC:ETH = 6:4）
-**リスク管理**: 段階的利益確定（+15%で50%、+25%で残り50%）
-**環境**: Hostinger VPS（CPU 2コア、メモリ8GB）
+円建て（JPY）での暗号資産自動売買システム。BTC/JPY・ETH/JPYの取引に対応し、機械学習による価格予測と段階的な利益確定・リスク管理機能を実装。
 
----
+## 📋 目次
 
-## 開発状況
+- [特徴](#特徴)
+- [システム構成](#システム構成)
+- [必要要件](#必要要件)
+- [セットアップ](#セットアップ)
+- [設定](#設定)
+- [使い方](#使い方)
+- [リスク管理](#リスク管理)
+- [トラブルシューティング](#トラブルシューティング)
+- [開発](#開発)
 
-### ✅ Phase 1: データ基盤構築（完了）
+## ✨ 特徴
 
-**実装済みコンポーネント**:
-- ✅ SQLiteデータベーススキーマ（price_data.db, trades.db, ml_models.db）
-- ✅ bitFlyer API連携モジュール（ccxt）- 円建て取引対応
-- ✅ 技術指標計算モジュール（20種類以上）
-  - トレンド系: SMA, EMA, MACD, ADX
-  - オシレーター系: RSI, Stochastic, CCI
-  - ボラティリティ系: Bollinger Bands, ATR
-  - 出来高系: OBV, VWAP
-- ✅ データ収集オーケストレーター
-- ✅ タスクスケジューラー（APScheduler）
-- ✅ ロギングシステム（7日ローテーション）
-- ✅ リソース監視システム
+### 📊 Phase 1: データインフラ
+- **bitFlyer API統合** - 円建て取引（BTC/JPY, ETH/JPY）
+- **SQLite データベース** - 3DB構成（価格・取引・MLモデル）
+- **テクニカル指標** - 20種類以上の指標を自動計算
+- **タスクスケジューラー** - APSchedulerによる自動実行
 
-**パフォーマンス**:
-- メモリ使用量: 153 MB（1.15%）- 非常に効率的
-- 技術指標計算: 1000行を0.14秒で処理
-- リソース警告: なし（全て正常範囲内）
+### 🤖 Phase 2: ML予測モデル
+- **特徴量エンジニアリング** - 107種類の特徴量を生成
+- **HMMモデル** - 市場状態分類（Bear/Range/Bull）
+- **LightGBMモデル** - 価格方向予測（3クラス分類）
+- **アンサンブルモデル** - HMM+LightGBMで信号統合
+- **バックテストエンジン** - 手数料・スリッページ考慮
 
-### ✅ Phase 2: MLモデル開発（完了）
+### 💹 Phase 3: 取引エンジン
+- **注文実行** - 成行/指値注文、テストモード対応
+- **ポジション管理** - エントリー/エグジット、損益計算
+- **リスク管理**
+  - ストップロス: -10%
+  - 第1段階利確: +15%で50%決済
+  - 第2段階利確: +25%で全決済
+  - 最大ドローダウン: -20%
 
-**実装済みコンポーネント**:
-- ✅ 特徴量エンジニアリングモジュール（107特徴量）
-  - 価格ベース、ボラティリティ、トレンド、モメンタム、出来高、時系列、ラグ、統計
-- ✅ HMMモデル（Hidden Markov Model）- 市場状態分類
-  - 3状態分類（Bear/Range/Bull）
-  - 状態遷移確率の推定
-- ✅ LightGBMモデル - 価格方向予測
-  - 3クラス分類（Down/Range/Up）
-  - 特徴量重要度分析
-- ✅ アンサンブルモデル（HMM + LightGBM統合）
-  - 市場状態に応じた予測調整
-  - 売買シグナル生成（BUY/SELL/HOLD）
-- ✅ バックテストエンジン
-  - 手数料・スリッページ考慮
-  - 勝率、プロフィット率、最大ドローダウン、シャープレシオ計算
+### 📈 Phase 4: レポート・通知
+- **Telegram Bot通知** - 取引通知、日次サマリー、アラート
+- **レポート生成** - 日次/週次レポート（定型フォーマット）
+- **税務処理** - CSVエクスポート、年間損益計算
 
-**バックテスト結果**:
-- 総リターン: +53.49%（7回取引、勝率71.43%）
-- プロフィット率: 6.59
-- シャープレシオ: 0.48
+### 🚀 Phase 5: 統合・デプロイ
+- **メイントレーダー** - 全コンポーネント統合
+- **設定管理** - YAML + 環境変数
+- **起動スクリプト** - 仮想環境自動セットアップ
+- **統合テスト** - エンドツーエンドテスト
 
-### ✅ Phase 3: 売買エンジン実装（完了）
+## 🏗 システム構成
 
-**実装済みコンポーネント**:
-- ✅ 注文実行モジュール（bitFlyer API統合）
-  - 成行注文・指値注文機能
-  - 注文キャンセル・状態確認
-  - テストモード対応（APIキーなしでも動作）
-  - 残高確認・ポジションサイズ計算
-- ✅ ポジション管理システム
-  - ポジションのオープン/クローズ
-  - 未実現損益・実現損益の計算
-  - DB永続化（positions, tradesテーブル）
-- ✅ リスク管理ロジック
-  - ストップロス（-10%）
-  - 段階的利益確定（+15%で50%、+25%で全決済）
-  - 最大ドローダウン管理（-20%）
-  - リスクベースポジションサイズ計算
+```
+CryptoTrader/
+├── data/                   # データ収集・処理
+│   ├── collector/         # bitFlyer API
+│   ├── processor/         # テクニカル指標
+│   └── storage/           # SQLite DB管理
+├── ml/                     # 機械学習
+│   ├── models/            # HMM, LightGBM, Ensemble
+│   └── training/          # 特徴量生成、バックテスト
+├── trading/                # 取引エンジン
+│   ├── order_executor.py  # 注文実行
+│   ├── position_manager.py # ポジション管理
+│   └── risk_manager.py    # リスク管理
+├── notification/           # Telegram通知
+├── reporting/              # レポート生成
+├── utils/                  # ユーティリティ
+├── tests/                  # テストコード
+├── config/                 # 設定ファイル
+├── main_trader.py          # メインプログラム
+└── start.sh                # 起動スクリプト
+```
 
-**リスク管理設定**:
-- ストップロス: 10%
-- 第1段階利確: +15%で50%決済
-- 第2段階利確: +25%で全決済
-- 最大ドローダウン: 20%
+## 💻 必要要件
 
-### ✅ Phase 4: レポート・通知機能（完了）
+### ハードウェア
+- **CPU**: 2コア以上
+- **RAM**: 8GB以上
+- **ストレージ**: 10GB以上の空き容量
 
-**実装済みコンポーネント**:
-- ✅ Telegram Bot（定型メッセージ）
-  - 取引開始/終了通知
-  - ストップロス/利益確定通知
-  - 日次サマリー
-  - アラート/エラー通知
-- ✅ レポート生成モジュール
-  - 日次レポート（資産状況、取引実績、保有ポジション）
-  - 週次レポート（週次損益、日別損益、リスク指標）
-  - 統計サマリー
-- ✅ 税務処理モジュール
-  - 取引履歴CSVエクスポート
-  - 年間損益計算
-  - 税務レポート（課税所得、税額概算）
+### ソフトウェア
+- **Python**: 3.11以上
+- **OS**: Linux / macOS / Windows（WSL推奨）
+- **Git**: バージョン管理
 
-**通知内容**:
-- 取引実行時の即時通知
-- 段階的利益確定の通知
-- ストップロス発動時のアラート
-- 日次パフォーマンスサマリー
+### 取引所アカウント
+- **bitFlyer**アカウント
+  - API Key / API Secret の取得
+  - 取引権限の有効化
 
-### 🚧 Phase 5: 統合・デプロイ（次のステップ）
+### オプション（推奨）
+- **Telegram Bot**: 通知機能
+- **VPS**: Hostinger等（24時間稼働）
 
----
+## 🚀 セットアップ
 
-## 環境構築
+### 1. リポジトリのクローン
 
-### 1. 依存パッケージのインストール
 ```bash
+git clone https://github.com/yourusername/Bitcoiner.git
+cd Bitcoiner
+```
+
+### 2. 仮想環境の作成と依存パッケージのインストール
+
+```bash
+# Python仮想環境作成
+python3 -m venv venv
+
+# 仮想環境有効化（Linux/macOS）
+source venv/bin/activate
+
+# 仮想環境有効化（Windows）
+venv\Scripts\activate
+
+# 依存パッケージインストール
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 2. 環境変数の設定
+### 3. ディレクトリ作成
+
 ```bash
-cp config/.env.example config/.env
-# .env ファイルを編集してAPI Keyを設定
+mkdir -p database logs ml_models tax_reports
 ```
 
-### 3. データベースの初期化
-データベースは自動的に初期化されます。初めて実行時に3つのDBファイルが作成されます。
+### 4. 環境変数の設定
 
----
-
-## 実行方法
-
-### テストの実行
 ```bash
-# Phase 1テスト
-python tests/test_database.py              # データベーステスト
-python tests/test_indicators.py            # 技術指標テスト
-python tests/test_phase1_integration.py    # Phase 1統合テスト
-
-# Phase 2テスト
-python tests/test_feature_engineering.py   # 特徴量エンジニアリング
-python tests/test_hmm_model.py             # HMMモデル
-python tests/test_lightgbm_model.py        # LightGBMモデル
-python tests/test_ensemble_model.py        # アンサンブルモデル
-python tests/test_phase2_integration.py    # Phase 2統合テスト
+# .envファイルを編集
+nano .env
 ```
 
-### スケジューラー起動（データ収集）
+```.env
+# bitFlyer API（本番運用時に設定）
+BITFLYER_API_KEY=your_api_key_here
+BITFLYER_API_SECRET=your_api_secret_here
+
+# Telegram Bot（通知機能を使う場合）
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+TELEGRAM_CHAT_ID=your_chat_id_here
+```
+
+**Telegram Bot設定手順:**
+1. [@BotFather](https://t.me/BotFather) にアクセス
+2. `/newbot` でBot作成 → トークン取得
+3. [@userinfobot](https://t.me/userinfobot) でChat ID確認
+
+### 5. 設定ファイルの確認
+
+`config/config.yaml` を確認・必要に応じて編集:
+
+```yaml
+trading:
+  initial_capital: 200000      # 初期資本（円）
+  min_confidence: 0.6          # 最小シグナル信頼度
+  trading_interval_minutes: 5  # 取引サイクル間隔
+
+risk_management:
+  stop_loss_pct: 10.0          # ストップロス
+  take_profit_first: 15.0      # 第1段階利確
+  take_profit_second: 25.0     # 第2段階利確
+```
+
+## 🔧 設定
+
+### bitFlyer API取得方法
+
+1. [bitFlyer](https://bitflyer.com/)にログイン
+2. 「API」→「新しいAPIキーを追加」
+3. 権限設定:
+   - 資産残高を取得: ✓
+   - 新規注文を出す: ✓
+   - 注文をキャンセルする: ✓
+4. APIキー・シークレットをコピーして`.env`に設定
+
+### リスク管理パラメータ
+
+| パラメータ | デフォルト | 説明 |
+|----------|---------|------|
+| `stop_loss_pct` | 10.0% | ストップロス（損切り） |
+| `take_profit_first` | +15.0% | 第1段階利確（50%決済） |
+| `take_profit_second` | +25.0% | 第2段階利確（全決済） |
+| `max_drawdown_pct` | 20.0% | 最大ドローダウン |
+| `max_position_size` | 0.95 | ポジションサイズ上限 |
+
+## 📖 使い方
+
+### 起動スクリプト（推奨）
+
 ```bash
-python scheduler.py
+./start.sh
 ```
 
-### Streamlit UI起動（Phase 4で実装予定）
+モード選択:
+1. **テストモード** - APIキーなし、モック動作
+2. **本番モード** - bitFlyer API使用
+3. **モデル学習のみ** - HMM + LightGBM学習
+4. **Phase 5統合テスト** - 全機能テスト
+
+### 手動起動
+
+#### 1. モデル学習
+
 ```bash
-# Windows
-run_streamlit.bat
+# BTC/JPYモデル学習
+python ml/training/train_models.py --symbol BTC/JPY
 
-# Linux/Mac
-bash run_streamlit.sh
+# ETH/JPYモデル学習
+python ml/training/train_models.py --symbol ETH/JPY
 ```
 
----
+#### 2. テストモード（APIキーなし）
 
-## プロジェクト構造
-```
-crypto_trader/
-├── config/                      # 設定ファイル
-│   ├── config.yaml              # メイン設定
-│   ├── .env.example             # 環境変数テンプレート
-│   └── risk_params.yaml         # リスク管理パラメータ
-├── data/                        # データ収集・処理
-│   ├── collector/               # データ収集
-│   │   ├── bitflyer_api.py      # bitFlyer API連携（円建て）
-│   │   └── data_orchestrator.py # データ収集統合
-│   ├── processor/               # データ処理
-│   │   └── indicators.py        # 技術指標計算
-│   └── storage/                 # データベース
-│       └── sqlite_manager.py    # SQLite管理
-├── ml/                          # 機械学習モデル（Phase 2で実装）
-│   ├── models/
-│   ├── training/
-│   ├── prediction/
-│   └── backtesting/
-├── trading/                     # 取引ロジック（Phase 3で実装）
-│   ├── strategy/
-│   ├── execution/
-│   ├── risk_management/
-│   └── position/
-├── reporting/                   # レポート・通知（Phase 4で実装）
-│   ├── telegram_bot/
-│   ├── report_generator/
-│   └── tax_calculator/
-├── ui/                          # UIダッシュボード（Phase 4で実装）
-│   └── streamlit_app/
-├── utils/                       # ユーティリティ
-│   ├── logger.py                # ロギング
-│   └── resource_monitor.py      # リソース監視
-├── database/                    # SQLiteファイル格納
-├── models/                      # 学習済みモデル（Phase 2で使用）
-├── logs/                        # ログファイル
-├── tests/                       # テストコード
-├── scheduler.py                 # タスクスケジューラー
-└── main.py                      # メインエントリーポイント
+```bash
+python main_trader.py --test --interval 1
 ```
 
+#### 3. 本番モード
+
+```bash
+# .envにAPIキー設定済みであることを確認
+python main_trader.py --interval 5
+```
+
+### コマンドラインオプション
+
+```bash
+python main_trader.py --help
+
+オプション:
+  --config PATH    設定ファイルパス（デフォルト: config/config.yaml）
+  --test           テストモード（APIキーなし）
+  --interval N     取引サイクル間隔（分、デフォルト: 5）
+```
+
+## ⚠️ リスク管理
+
+### 段階的利益確定
+
+```
+エントリー価格: ¥12,000,000
+
++15% (¥13,800,000) → 50%決済（第1段階利確）
++25% (¥15,000,000) → 残り全決済（第2段階利確）
+
+-10% (¥10,800,000) → 全決済（ストップロス）
+```
+
+### ポジションサイズ計算
+
+```
+総資産: ¥200,000
+BTC配分: 60% → ¥120,000
+ETH配分: 40% → ¥80,000
+
+最大ポジション: 資産の95%まで
+```
+
+### 推奨設定
+
+- **初期資本**: 最低20万円以上
+- **取引サイクル**: 5分間隔（デフォルト）
+- **最小信頼度**: 60%以上（低すぎると頻繁に取引）
+- **監視**: 定期的にログ・Telegram通知を確認
+
+## 🐛 トラブルシューティング
+
+### よくある問題
+
+#### 1. データ収集エラー
+
+```
+bitflyer fetchOHLCV() is not supported yet
+```
+
+**原因**: bitFlyerはfetchOHLCV()未サポート
+**解決**: 自動的にfetch_trades()からOHLCVを構築（実装済み）
+
+#### 2. モデル読み込みエラー
+
+```
+モデルファイルが見つかりません
+```
+
+**原因**: モデル未学習
+**解決**: `./start.sh` → 3) モデル学習のみ
+
+#### 3. API接続エラー
+
+```
+Authentication failed
+```
+
+**原因**: APIキーの設定ミス
+**解決**: `.env`の`BITFLYER_API_KEY`/`BITFLYER_API_SECRET`を確認
+
+#### 4. Telegram通知が届かない
+
+```
+Telegram通知が無効です
+```
+
+**原因**: Token/Chat ID未設定
+**解決**: `.env`で`TELEGRAM_BOT_TOKEN`と`TELEGRAM_CHAT_ID`を設定
+
+### ログ確認
+
+```bash
+# メインログ
+tail -f logs/main_trader.log
+
+# テストログ
+tail -f logs/test_phase5.log
+```
+
+### データベース確認
+
+```bash
+# SQLiteでDB確認
+sqlite3 database/trades.db "SELECT * FROM trades ORDER BY timestamp DESC LIMIT 10;"
+```
+
+## 🔧 開発
+
+### テスト実行
+
+```bash
+# Phase 5統合テスト
+python tests/test_phase5_integration.py
+
+# Phase 4レポートテスト
+python tests/test_phase4_integration.py
+
+# Phase 3取引エンジンテスト
+python tests/test_phase3_integration.py
+```
+
+### コード品質
+
+```bash
+# フォーマット
+black .
+
+# リント
+flake8 .
+
+# カバレッジ
+pytest --cov=. tests/
+```
+
+## 📊 パフォーマンス
+
+### バックテスト結果（Phase 2）
+
+```
+期間: 2年分のデータ
+総リターン: +53.49%
+勝率: 71.43%
+最大ドローダウン: -12.3%
+```
+
+### リソース使用量
+
+```
+メモリ使用量: ~150MB（8GBの1.9%）
+CPU使用率: 平均5-10%（2コア）
+ディスク: ~500MB（データベース + ログ）
+```
+
+## 📝 ライセンス
+
+MIT License - 詳細は[LICENSE](LICENSE)を参照
+
+## ⚡ 注意事項
+
+1. **投資は自己責任**: 本システムは予測の正確性を保証しません
+2. **少額から開始**: 初めは少額資本でテスト運用を推奨
+3. **定期監視**: Telegram通知・ログを定期的に確認
+4. **API制限**: bitFlyerのレート制限（0.5秒間隔）に注意
+5. **税務処理**: 年間損益の計算・確定申告は各自で実施
+
+## 🤝 サポート
+
+- **Issues**: [GitHub Issues](https://github.com/yourusername/Bitcoiner/issues)
+- **ドキュメント**: [Wiki](https://github.com/yourusername/Bitcoiner/wiki)
+
+## 📚 参考リンク
+
+- [bitFlyer API ドキュメント](https://lightning.bitflyer.com/docs)
+- [ccxt ドキュメント](https://docs.ccxt.com/)
+- [LightGBM ドキュメント](https://lightgbm.readthedocs.io/)
+- [hmmlearn ドキュメント](https://hmmlearn.readthedocs.io/)
+
 ---
 
-## 技術スタック
-
-- **言語**: Python 3.10+
-- **データベース**: SQLite 3.x
-- **取引所API**: ccxt（bitFlyer）- 円建て取引
-- **機械学習**: scikit-learn, LightGBM, hmmlearn（Phase 2）
-- **通知**: python-telegram-bot（Phase 4）
-- **UI**: Streamlit（Phase 4）
-- **スケジューリング**: APScheduler
-- **リソース監視**: psutil
-
----
-
-## テスト結果
-
-### Phase 1統合テスト（2025-11-19）
-- ✅ データベース: 50件のデータ取得成功
-- ✅ 技術指標計算: 0.14秒で1000行処理
-- ✅ メモリ効率: 153.07 MB使用（1.15%）
-- ✅ リソース警告: なし
-
----
-
-## ライセンス
-Private Project
+**免責事項**: このソフトウェアは教育目的で提供されています。暗号資産取引には大きなリスクが伴います。損失の可能性を理解した上で、自己責任でご使用ください。

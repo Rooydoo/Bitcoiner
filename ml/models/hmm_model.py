@@ -330,6 +330,44 @@ class MarketRegimeHMM:
 
         logger.info(f"HMMモデル読み込み: {filepath}")
 
+    def load_model(self, filepath: str) -> bool:
+        """
+        モデルを読み込み（load()のエイリアス、戻り値bool）
+
+        Args:
+            filepath: 読み込み元パス
+
+        Returns:
+            読み込み成功したかどうか
+        """
+        try:
+            if not Path(filepath).exists():
+                logger.warning(f"モデルファイルが見つかりません: {filepath}")
+                return False
+
+            self.load(filepath)
+            return True
+        except Exception as e:
+            logger.error(f"モデル読み込み失敗: {e}")
+            return False
+
+    def save_model(self, filepath: str) -> bool:
+        """
+        モデルを保存（save()のエイリアス、戻り値bool）
+
+        Args:
+            filepath: 保存先パス
+
+        Returns:
+            保存成功したかどうか
+        """
+        try:
+            self.save(filepath)
+            return True
+        except Exception as e:
+            logger.error(f"モデル保存失敗: {e}")
+            return False
+
     def get_transition_matrix(self) -> np.ndarray:
         """
         状態遷移行列を取得
