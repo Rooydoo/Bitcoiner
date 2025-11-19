@@ -8,7 +8,7 @@ import threading
 import time
 from typing import Optional, Dict, Callable
 from datetime import datetime
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes
 import yaml
 from pathlib import Path
@@ -327,8 +327,30 @@ class TelegramBotHandler:
             logger.error(f"set_stop_lossコマンドエラー: {e}")
             await self._send_reply(update, f"⚠️ エラー: {str(e)}")
 
+    async def cmd_commands(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """コマンド一覧（簡潔版）"""
+        if not self._check_authorization(update):
+            await self._send_reply(update, "⛔ 認証エラー：このBotを使用する権限がありません")
+            return
+
+        message = """
+📋 <b>コマンド一覧</b>
+
+/status - 状態確認
+/positions - ポジション
+/config - 設定表示
+/pause - 一時停止
+/resume - 再開
+/set_stop_loss <値> - 損切変更
+/commands - この一覧
+/help - 詳細ヘルプ
+
+💡 「/」を入力するとコマンド候補が表示されます
+"""
+        await self._send_reply(update, message.strip())
+
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """ヘルプコマンド"""
+        """ヘルプコマンド（詳細版）"""
         if not self._check_authorization(update):
             await self._send_reply(update, "⛔ 認証エラー：このBotを使用する権限がありません")
             return
@@ -351,7 +373,12 @@ class TelegramBotHandler:
 例: /set_stop_loss 8.0
 
 ❓ <b>その他</b>
-/help - このヘルプを表示
+/commands - コマンド一覧（簡潔版）
+/help - この詳細ヘルプ
+
+💡 <b>ヒント</b>
+チャット入力欄で「/」を入力すると
+コマンド候補が自動的に表示されます！
 """
         await self._send_reply(update, message.strip())
 
@@ -367,6 +394,25 @@ class TelegramBotHandler:
             logger.warning("Bot既に起動中")
             return
 
+        async def setup_bot():
+            """Bot初期設定"""
+            try:
+                # コマンドリスト設定（Telegram UIでコマンド候補を表示）
+                commands = [
+                    BotCommand("status", "システム状態確認"),
+                    BotCommand("positions", "保有ポジション一覧"),
+                    BotCommand("config", "現在の設定表示"),
+                    BotCommand("pause", "取引一時停止"),
+                    BotCommand("resume", "取引再開"),
+                    BotCommand("set_stop_loss", "損切ライン変更"),
+                    BotCommand("commands", "コマンド一覧"),
+                    BotCommand("help", "詳細ヘルプ"),
+                ]
+                await self.application.bot.set_my_commands(commands)
+                logger.info("Botコマンドリスト設定完了")
+            except Exception as e:
+                logger.warning(f"Botコマンドリスト設定エラー: {e}")
+
         def run_bot():
             """Botメインループ"""
             try:
@@ -380,10 +426,17 @@ class TelegramBotHandler:
                 self.application.add_handler(CommandHandler("positions", self.cmd_positions))
                 self.application.add_handler(CommandHandler("config", self.cmd_config))
                 self.application.add_handler(CommandHandler("set_stop_loss", self.cmd_set_stop_loss))
+                self.application.add_handler(CommandHandler("commands", self.cmd_commands))
                 self.application.add_handler(CommandHandler("help", self.cmd_help))
-                self.application.add_handler(CommandHandler("start", self.cmd_help))
+                self.application.add_handler(CommandHandler("start", self.cmd_commands))
 
                 logger.info("Telegram Bot起動中...")
+
+                # 起動時初期設定
+                self.application.job_queue.run_once(
+                    lambda context: setup_bot(),
+                    when=0
+                )
 
                 # Polling開始
                 self.application.run_polling(allowed_updates=Update.ALL_TYPES)
