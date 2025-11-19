@@ -4,9 +4,16 @@
 """
 
 import logging
+import sys
+from pathlib import Path
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 from data.storage.sqlite_manager import SQLiteManager
+
+# プロジェクトルートをパスに追加
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from utils.strategy_advisor import StrategyAdvisor
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +27,7 @@ class ReportGenerator:
             db_manager: SQLiteManagerインスタンス
         """
         self.db_manager = db_manager
+        self.strategy_advisor = StrategyAdvisor()
         logger.info("レポート生成システム初期化")
 
     def generate_daily_report(self, date: Optional[datetime] = None) -> str:
@@ -161,6 +169,13 @@ class ReportGenerator:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
+        # 戦略調整の提案を追加
+        try:
+            suggestions = self.strategy_advisor.analyze_and_suggest(weekly_data, period_type='weekly')
+            report += "\n" + self.strategy_advisor.format_suggestions_for_report(suggestions)
+        except Exception as e:
+            logger.error(f"戦略提案生成エラー: {e}")
+
         logger.info(f"週次レポート生成完了: {period_str}")
         return report.strip()
 
@@ -231,6 +246,13 @@ class ReportGenerator:
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
+
+        # 戦略調整の提案を追加（月次は詳細分析）
+        try:
+            suggestions = self.strategy_advisor.analyze_and_suggest(monthly_data, period_type='monthly')
+            report += "\n" + self.strategy_advisor.format_suggestions_for_report(suggestions)
+        except Exception as e:
+            logger.error(f"戦略提案生成エラー: {e}")
 
         logger.info(f"月次レポート生成完了: {period_str}")
         return report.strip()
@@ -329,7 +351,22 @@ class ReportGenerator:
             'avg_holding_hours': 15.0,
             'daily_pnl_list': daily_pnl_list,
             'max_drawdown_pct': 5.0,
-            'sharpe_ratio': 1.5
+            'sharpe_ratio': 1.5,
+            # 通貨ペア別パフォーマンス
+            'pair_performance': {
+                'BTC/JPY': {
+                    'win_rate': 0.75,
+                    'profit_factor': 4.0,
+                    'sharpe_ratio': 1.8,
+                    'trades': 6
+                },
+                'ETH/JPY': {
+                    'win_rate': 0.60,
+                    'profit_factor': 2.5,
+                    'sharpe_ratio': 1.2,
+                    'trades': 4
+                }
+            }
         }
 
     def _get_monthly_data(self, start_date: datetime, end_date: datetime) -> Dict:
@@ -373,6 +410,21 @@ class ReportGenerator:
                 'side': 'short',
                 'pnl': -5000,
                 'pnl_pct': -4.2
+            },
+            # 通貨ペア別パフォーマンス
+            'pair_performance': {
+                'BTC/JPY': {
+                    'win_rate': 0.72,
+                    'profit_factor': 3.2,
+                    'sharpe_ratio': 2.0,
+                    'trades': 24
+                },
+                'ETH/JPY': {
+                    'win_rate': 0.67,
+                    'profit_factor': 1.8,
+                    'sharpe_ratio': 1.5,
+                    'trades': 16
+                }
             }
         }
 
