@@ -31,13 +31,30 @@
 - 技術指標計算: 1000行を0.14秒で処理
 - リソース警告: なし（全て正常範囲内）
 
-### 🚧 Phase 2: MLモデル開発（次のステップ）
-- HMM（Hidden Markov Model）実装
-- LightGBM実装
-- 特徴量エンジニアリング
-- バックテストエンジン構築
+### ✅ Phase 2: MLモデル開発（完了）
 
-### 📋 Phase 3: 売買エンジン実装
+**実装済みコンポーネント**:
+- ✅ 特徴量エンジニアリングモジュール（107特徴量）
+  - 価格ベース、ボラティリティ、トレンド、モメンタム、出来高、時系列、ラグ、統計
+- ✅ HMMモデル（Hidden Markov Model）- 市場状態分類
+  - 3状態分類（Bear/Range/Bull）
+  - 状態遷移確率の推定
+- ✅ LightGBMモデル - 価格方向予測
+  - 3クラス分類（Down/Range/Up）
+  - 特徴量重要度分析
+- ✅ アンサンブルモデル（HMM + LightGBM統合）
+  - 市場状態に応じた予測調整
+  - 売買シグナル生成（BUY/SELL/HOLD）
+- ✅ バックテストエンジン
+  - 手数料・スリッページ考慮
+  - 勝率、プロフィット率、最大ドローダウン、シャープレシオ計算
+
+**バックテスト結果**:
+- 総リターン: +53.49%（7回取引、勝率71.43%）
+- プロフィット率: 6.59
+- シャープレシオ: 0.48
+
+### 🚧 Phase 3: 売買エンジン実装（次のステップ）
 - 注文実行モジュール
 - ポジション管理システム
 - リスク管理ロジック
@@ -73,14 +90,17 @@ cp config/.env.example config/.env
 
 ### テストの実行
 ```bash
-# データベーステスト
-python tests/test_database.py
+# Phase 1テスト
+python tests/test_database.py              # データベーステスト
+python tests/test_indicators.py            # 技術指標テスト
+python tests/test_phase1_integration.py    # Phase 1統合テスト
 
-# 技術指標テスト
-python tests/test_indicators.py
-
-# Phase 1統合テスト
-python tests/test_phase1_integration.py
+# Phase 2テスト
+python tests/test_feature_engineering.py   # 特徴量エンジニアリング
+python tests/test_hmm_model.py             # HMMモデル
+python tests/test_lightgbm_model.py        # LightGBMモデル
+python tests/test_ensemble_model.py        # アンサンブルモデル
+python tests/test_phase2_integration.py    # Phase 2統合テスト
 ```
 
 ### スケジューラー起動（データ収集）
