@@ -1,0 +1,46 @@
+# CryptoTrader 設定ファイル
+
+# 取引所設定
+exchange:
+  name: binance
+  use_testnet: false  # 本番運用時はfalse
+  
+# 取引対象通貨
+trading_pairs:
+  - symbol: BTC/USDT
+    allocation: 0.6  # 60%
+  - symbol: ETH/USDT
+    allocation: 0.4  # 40%
+
+# リスク管理パラメータ
+risk_management:
+  max_position_size_pct: 2.0  # 総資産の2%
+  stop_loss_pct: 5.0           # 5%損失で強制決済
+  take_profit_first: 15.0      # 第1段階利益確定 15%
+  take_profit_second: 25.0     # 第2段階利益確定 25%
+  max_daily_loss_pct: 5.0      # 日次最大損失
+  max_weekly_loss_pct: 10.0    # 週次最大損失
+  max_monthly_loss_pct: 15.0   # 月次最大損失
+  max_positions: 2             # 最大同時保有数
+  consecutive_loss_limit: 5    # 連続損失制限
+
+# ML設定
+machine_learning:
+  initial_training_days: 730   # 2年分
+  retrain_interval_days: 7     # 週次再学習
+  lightgbm:
+    num_threads: 2
+    max_depth: 8
+    num_leaves: 31
+
+# レポート設定
+reporting:
+  morning_report_time: "07:00"
+  noon_report_time: "13:00"
+  evening_report_time: "22:00"
+  
+# Streamlit UI設定
+ui:
+  port: 8501
+  host: "0.0.0.0"
+  enable_basic_auth: true
