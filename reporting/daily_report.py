@@ -13,7 +13,7 @@ from data.storage.sqlite_manager import SQLiteManager
 # プロジェクトルートをパスに追加
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from utils.strategy_advisor import StrategyAdvisor
+from utils.strategy_advisor import create_strategy_advisor
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ class ReportGenerator:
             db_manager: SQLiteManagerインスタンス
         """
         self.db_manager = db_manager
-        self.strategy_advisor = StrategyAdvisor()
+        self.strategy_advisor = create_strategy_advisor()
         logger.info("レポート生成システム初期化")
 
     def generate_daily_report(self, date: Optional[datetime] = None) -> str:

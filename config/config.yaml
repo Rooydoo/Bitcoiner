@@ -43,6 +43,12 @@ reporting:
   weekly_report_time: "22:00"  # 週次レポート時刻
   monthly_report_day: -1       # 月次レポート日（-1=月末）
   monthly_report_time: "22:00" # 月次レポート時刻
+
+# 戦略アドバイザー設定
+strategy_advisor:
+  use_llm: true                         # LLM（Claude Sonnet）を使用
+  model: "claude-sonnet-4-5-20250929"   # 使用モデル
+  fallback_to_rule_based: true          # LLM失敗時にルールベースにフォールバック
   
 # 取引設定
 trading:
