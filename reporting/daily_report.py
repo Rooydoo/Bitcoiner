@@ -14,6 +14,7 @@ from data.storage.sqlite_manager import SQLiteManager
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.strategy_advisor import create_strategy_advisor
+from utils.performance_ratio import create_performance_analyzer
 
 logger = logging.getLogger(__name__)
 
@@ -21,13 +22,16 @@ logger = logging.getLogger(__name__)
 class ReportGenerator:
     """レポート生成クラス"""
 
-    def __init__(self, db_manager: SQLiteManager):
+    def __init__(self, db_manager: SQLiteManager, data_collector=None):
         """
         Args:
             db_manager: SQLiteManagerインスタンス
+            data_collector: データ収集インスタンス（パフォーマンス比較用）
         """
         self.db_manager = db_manager
+        self.data_collector = data_collector
         self.strategy_advisor = create_strategy_advisor()
+        self.performance_analyzer = create_performance_analyzer(data_collector)
         logger.info("レポート生成システム初期化")
 
     def generate_daily_report(self, date: Optional[datetime] = None) -> str:
@@ -176,6 +180,28 @@ class ReportGenerator:
         except Exception as e:
             logger.error(f"戦略提案生成エラー: {e}")
 
+        # パフォーマンス比較を追加
+        try:
+            if self.data_collector:
+                # 取引中のペアを取得（config.yamlから）
+                import yaml
+                from pathlib import Path
+                config_path = Path("config/config.yaml")
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = yaml.safe_load(f)
+                trading_pairs = [p['symbol'] for p in config.get('trading_pairs', [])]
+
+                # パフォーマンス比較分析
+                performance_results = self.performance_analyzer.calculate_performance_ratios(
+                    trading_pairs=trading_pairs,
+                    period_days=7
+                )
+
+                if performance_results:
+                    report += "\n" + self.performance_analyzer.format_report(performance_results)
+        except Exception as e:
+            logger.error(f"パフォーマンス比較エラー: {e}")
+
         logger.info(f"週次レポート生成完了: {period_str}")
         return report.strip()
 
@@ -253,6 +279,28 @@ class ReportGenerator:
             report += "\n" + self.strategy_advisor.format_suggestions_for_report(suggestions)
         except Exception as e:
             logger.error(f"戦略提案生成エラー: {e}")
+
+        # パフォーマンス比較を追加
+        try:
+            if self.data_collector:
+                # 取引中のペアを取得（config.yamlから）
+                import yaml
+                from pathlib import Path
+                config_path = Path("config/config.yaml")
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = yaml.safe_load(f)
+                trading_pairs = [p['symbol'] for p in config.get('trading_pairs', [])]
+
+                # パフォーマンス比較分析（月次は30日間）
+                performance_results = self.performance_analyzer.calculate_performance_ratios(
+                    trading_pairs=trading_pairs,
+                    period_days=30
+                )
+
+                if performance_results:
+                    report += "\n" + self.performance_analyzer.format_report(performance_results)
+        except Exception as e:
+            logger.error(f"パフォーマンス比較エラー: {e}")
 
         logger.info(f"月次レポート生成完了: {period_str}")
         return report.strip()

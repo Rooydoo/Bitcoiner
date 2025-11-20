@@ -138,7 +138,7 @@ class CryptoTrader:
             trader_instance=self
         )
 
-        self.report_generator = ReportGenerator(self.db_manager)
+        self.report_generator = ReportGenerator(self.db_manager, self.data_collector)
         logger.info("  ✓ Telegram通知、Botハンドラー、レポート生成モジュール初期化完了")
 
         # 状態管理
