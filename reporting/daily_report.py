@@ -50,7 +50,6 @@ class ReportGenerator:
         date_str = date.strftime('%Y-%m-%d')
 
         # 日次データ取得（DBから）
-        # TODO: 実際のDB取得ロジック実装
         daily_data = self._get_daily_data(date)
 
         report = f"""
@@ -307,173 +306,446 @@ class ReportGenerator:
 
     def generate_summary_stats(self) -> Dict:
         """
-        統計サマリーを生成
+        統計サマリーを生成（実DB）
 
         Returns:
             統計情報の辞書
         """
-        # TODO: 実際のDB取得ロジック
+        import sqlite3
+
+        initial_capital = 200000
+        try:
+            from pathlib import Path
+            import yaml
+            config_path = Path("config/config.yaml")
+            if config_path.exists():
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = yaml.safe_load(f)
+                    initial_capital = config.get('trading', {}).get('initial_capital', 200000)
+        except Exception:
+            pass
+
+        # 全期間の日次損益を取得
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        all_pnl_df = self.db_manager.get_daily_pnl('2000-01-01', today_str)
+
+        # 集計値
+        total_trades = int(all_pnl_df['total_trades'].sum()) if not all_pnl_df.empty else 0
+        winning_trades = int(all_pnl_df['winning_trades'].sum()) if not all_pnl_df.empty else 0
+        losing_trades = int(all_pnl_df['losing_trades'].sum()) if not all_pnl_df.empty else 0
+        total_profit = float(all_pnl_df['total_profit'].sum()) if not all_pnl_df.empty else 0
+        total_loss = float(all_pnl_df['total_loss'].sum()) if not all_pnl_df.empty else 0
+        total_pnl = float(all_pnl_df['net_pnl'].sum()) if not all_pnl_df.empty else 0
+        win_rate = winning_trades / total_trades if total_trades > 0 else 0
+
+        # 全ポジション（決済済み）を取得
+        conn = sqlite3.connect(self.db_manager.trades_db)
+
+        query = "SELECT * FROM positions WHERE status = 'closed'"
+        positions_df = pd.read_sql_query(query, conn)
+        conn.close()
+
+        # 平均保有時間
+        avg_holding_hours = 0.0
+        if not positions_df.empty:
+            avg_holding_hours = float(positions_df['hold_time_hours'].mean())
+
+        # 平均勝利/損失
+        avg_win = total_profit / winning_trades if winning_trades > 0 else 0
+        avg_loss = total_loss / losing_trades if losing_trades > 0 else 0
+
+        # プロフィットファクター
+        profit_factor = abs(total_profit / total_loss) if total_loss != 0 else 0
+
         stats = {
-            'total_trades': 10,
-            'winning_trades': 7,
-            'losing_trades': 3,
-            'win_rate': 0.7,
-            'total_pnl': 10000,
-            'total_pnl_pct': 5.0,
-            'avg_win': 2000,
-            'avg_loss': -1000,
-            'profit_factor': 2.0,
-            'max_drawdown_pct': 5.0,
-            'sharpe_ratio': 1.5,
-            'avg_holding_hours': 12.5
+            'total_trades': total_trades,
+            'winning_trades': winning_trades,
+            'losing_trades': losing_trades,
+            'win_rate': win_rate,
+            'total_pnl': total_pnl,
+            'total_pnl_pct': (total_pnl / initial_capital * 100) if initial_capital > 0 else 0,
+            'avg_win': avg_win,
+            'avg_loss': -avg_loss,  # 負の値で表示
+            'profit_factor': profit_factor,
+            'max_drawdown_pct': 0.0,  # 簡易実装
+            'sharpe_ratio': 0.0,  # 簡易実装
+            'avg_holding_hours': avg_holding_hours
         }
 
         return stats
 
     def _get_daily_data(self, date: datetime) -> Dict:
-        """日次データを取得（モック）"""
-        # TODO: 実際のDB取得ロジック実装
+        """日次データを取得（実DB）"""
+        import sqlite3
+
+        date_str = date.strftime('%Y-%m-%d')
+        initial_capital = 200000  # デフォルト値
+
+        try:
+            # 設定ファイルから初期資本を取得
+            from pathlib import Path
+            import yaml
+            config_path = Path("config/config.yaml")
+            if config_path.exists():
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = yaml.safe_load(f)
+                    initial_capital = config.get('trading', {}).get('initial_capital', 200000)
+        except Exception:
+            pass
+
+        # 日次損益データ取得
+        daily_pnl_df = self.db_manager.get_daily_pnl(date_str, date_str)
+
+        if not daily_pnl_df.empty:
+            row = daily_pnl_df.iloc[0]
+            trades_count = int(row.get('total_trades', 0))
+            winning_trades = int(row.get('winning_trades', 0))
+            losing_trades = int(row.get('losing_trades', 0))
+            total_profit = float(row.get('total_profit', 0))
+            total_loss = float(row.get('total_loss', 0))
+            daily_pnl = float(row.get('net_pnl', 0))
+            win_rate = float(row.get('win_rate', 0))
+        else:
+            trades_count = winning_trades = losing_trades = 0
+            total_profit = total_loss = daily_pnl = win_rate = 0.0
+
+        # 累積損益を計算（全期間の日次損益を合計）
+        all_pnl_df = self.db_manager.get_daily_pnl('2000-01-01', date_str)
+        total_pnl = float(all_pnl_df['net_pnl'].sum()) if not all_pnl_df.empty else 0.0
+        total_equity = initial_capital + total_pnl
+
+        # オープンポジション取得
+        open_positions_df = self.db_manager.get_open_positions()
+        open_positions = []
+
+        for _, pos in open_positions_df.iterrows():
+            # 現在価格を取得（実際にはAPI呼び出しが必要だがここでは簡易実装）
+            current_price = float(pos.get('entry_price', 0))  # 仮に entry_price を使用
+            entry_price = float(pos.get('entry_price', 0))
+            quantity = float(pos.get('entry_amount', 0))
+
+            unrealized_pnl = (current_price - entry_price) * quantity
+            unrealized_pnl_pct = ((current_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+
+            entry_time = pd.to_datetime(pos.get('entry_time', 0), unit='s')
+            holding_hours = (datetime.now() - entry_time).total_seconds() / 3600
+
+            open_positions.append({
+                'symbol': str(pos.get('symbol', '')),
+                'side': str(pos.get('side', '')),
+                'entry_price': entry_price,
+                'current_price': current_price,
+                'quantity': quantity,
+                'unrealized_pnl': unrealized_pnl,
+                'unrealized_pnl_pct': unrealized_pnl_pct,
+                'holding_hours': holding_hours
+            })
+
+        # 当日の決済済み取引を取得
+        conn = sqlite3.connect(self.db_manager.trades_db)
+
+        # 日付の開始・終了タイムスタンプ
+        start_ts = int(date.replace(hour=0, minute=0, second=0).timestamp())
+        end_ts = int(date.replace(hour=23, minute=59, second=59).timestamp())
+
+        query = """
+        SELECT * FROM positions
+        WHERE status = 'closed'
+        AND exit_time >= ? AND exit_time <= ?
+        ORDER BY exit_time ASC
+        """
+
+        trades_df = pd.read_sql_query(query, conn, params=[start_ts, end_ts])
+        conn.close()
+
+        today_trades = []
+        for _, trade in trades_df.iterrows():
+            entry_time = pd.to_datetime(trade.get('entry_time', 0), unit='s').strftime('%H:%M')
+            exit_time = pd.to_datetime(trade.get('exit_time', 0), unit='s').strftime('%H:%M')
+
+            today_trades.append({
+                'symbol': str(trade.get('symbol', '')),
+                'side': str(trade.get('side', '')),
+                'pnl': float(trade.get('profit_loss', 0)),
+                'pnl_pct': float(trade.get('profit_loss_pct', 0)),
+                'entry_time': entry_time,
+                'exit_time': exit_time
+            })
+
+        # 平均勝利/損失
+        avg_win = total_profit / winning_trades if winning_trades > 0 else 0
+        avg_loss = abs(total_loss) / losing_trades if losing_trades > 0 else 0
+        profit_factor = abs(total_profit / total_loss) if total_loss != 0 else 0
+
         return {
-            'total_equity': 205000,
-            'daily_pnl': 5000,
-            'daily_pnl_pct': 2.5,
-            'initial_capital': 200000,
-            'total_pnl': 5000,
-            'total_pnl_pct': 2.5,
-            'trades_count': 2,
-            'winning_trades': 2,
-            'losing_trades': 0,
-            'win_rate': 1.0,
-            'avg_win': 2500,
-            'avg_loss': 0,
-            'profit_factor': 0,
-            'open_positions': [],
-            'today_trades': [
-                {
-                    'symbol': 'BTC/JPY',
-                    'side': 'long',
-                    'pnl': 3000,
-                    'pnl_pct': 2.5,
-                    'entry_time': '09:00',
-                    'exit_time': '15:00'
-                },
-                {
-                    'symbol': 'ETH/JPY',
-                    'side': 'long',
-                    'pnl': 2000,
-                    'pnl_pct': 2.0,
-                    'entry_time': '10:00',
-                    'exit_time': '16:00'
-                }
-            ],
-            'max_drawdown_pct': 3.0,
-            'sharpe_ratio': 1.2
+            'total_equity': total_equity,
+            'daily_pnl': daily_pnl,
+            'daily_pnl_pct': (daily_pnl / initial_capital * 100) if initial_capital > 0 else 0,
+            'initial_capital': initial_capital,
+            'total_pnl': total_pnl,
+            'total_pnl_pct': (total_pnl / initial_capital * 100) if initial_capital > 0 else 0,
+            'trades_count': trades_count,
+            'winning_trades': winning_trades,
+            'losing_trades': losing_trades,
+            'win_rate': win_rate,
+            'avg_win': avg_win,
+            'avg_loss': avg_loss,
+            'profit_factor': profit_factor,
+            'open_positions': open_positions,
+            'today_trades': today_trades,
+            'max_drawdown_pct': 0.0,  # 計算は複雑なので簡易実装
+            'sharpe_ratio': 0.0  # 計算は複雑なので簡易実装
         }
 
     def _get_weekly_data(self, start_date: datetime, end_date: datetime) -> Dict:
-        """週次データを取得（モック）"""
-        # TODO: 実際のDB取得ロジック実装
-        daily_pnl_list = []
-        current_date = start_date
+        """週次データを取得（実DB）"""
+        import sqlite3
 
-        while current_date <= end_date:
+        start_str = start_date.strftime('%Y-%m-%d')
+        end_str = end_date.strftime('%Y-%m-%d')
+
+        initial_capital = 200000
+        try:
+            from pathlib import Path
+            import yaml
+            config_path = Path("config/config.yaml")
+            if config_path.exists():
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = yaml.safe_load(f)
+                    initial_capital = config.get('trading', {}).get('initial_capital', 200000)
+        except Exception:
+            pass
+
+        # 期間内の日次損益を取得
+        daily_pnl_df = self.db_manager.get_daily_pnl(start_str, end_str)
+
+        # 日別損益リスト作成
+        daily_pnl_list = []
+        for _, row in daily_pnl_df.iterrows():
             daily_pnl_list.append({
-                'date': current_date.strftime('%Y-%m-%d'),
-                'pnl': 1000 if current_date.weekday() < 5 else 0
+                'date': str(row.get('date', '')),
+                'pnl': float(row.get('net_pnl', 0))
             })
-            current_date += timedelta(days=1)
+
+        # 集計値
+        trades_count = int(daily_pnl_df['total_trades'].sum())
+        winning_trades = int(daily_pnl_df['winning_trades'].sum())
+        losing_trades = int(daily_pnl_df['losing_trades'].sum())
+        total_profit = float(daily_pnl_df['total_profit'].sum())
+        total_loss = float(daily_pnl_df['total_loss'].sum())
+        weekly_pnl = float(daily_pnl_df['net_pnl'].sum())
+        win_rate = winning_trades / trades_count if trades_count > 0 else 0
+
+        # 累積損益
+        all_pnl_df = self.db_manager.get_daily_pnl('2000-01-01', end_str)
+        total_pnl = float(all_pnl_df['net_pnl'].sum()) if not all_pnl_df.empty else 0.0
+        total_equity = initial_capital + total_pnl
+
+        # 期間内のポジションを取得して平均保有時間を計算
+        conn = sqlite3.connect(self.db_manager.trades_db)
+
+        start_ts = int(start_date.timestamp())
+        end_ts = int(end_date.timestamp())
+
+        query = """
+        SELECT * FROM positions
+        WHERE status = 'closed'
+        AND exit_time >= ? AND exit_time <= ?
+        """
+
+        positions_df = pd.read_sql_query(query, conn, params=[start_ts, end_ts])
+
+        avg_holding_hours = 0.0
+        if not positions_df.empty:
+            avg_holding_hours = float(positions_df['hold_time_hours'].mean())
+
+        # 通貨ペア別パフォーマンス
+        pair_performance = {}
+
+        for symbol in ['BTC/JPY', 'ETH/JPY']:
+            symbol_positions = positions_df[positions_df['symbol'] == symbol]
+
+            if not symbol_positions.empty:
+                wins = len(symbol_positions[symbol_positions['profit_loss'] > 0])
+                total = len(symbol_positions)
+                profits = symbol_positions[symbol_positions['profit_loss'] > 0]['profit_loss'].sum()
+                losses = abs(symbol_positions[symbol_positions['profit_loss'] < 0]['profit_loss'].sum())
+
+                pair_performance[symbol] = {
+                    'win_rate': wins / total if total > 0 else 0,
+                    'profit_factor': profits / losses if losses > 0 else 0,
+                    'sharpe_ratio': 0.0,  # 簡易実装
+                    'trades': total
+                }
+
+        conn.close()
+
+        profit_factor = abs(total_profit / total_loss) if total_loss != 0 else 0
 
         return {
-            'total_equity': 210000,
-            'weekly_pnl': 10000,
-            'weekly_pnl_pct': 5.0,
-            'total_pnl': 10000,
-            'total_pnl_pct': 5.0,
-            'trades_count': 10,
-            'winning_trades': 7,
-            'losing_trades': 3,
-            'win_rate': 0.7,
-            'total_profit': 14000,
-            'total_loss': 4000,
-            'profit_factor': 3.5,
-            'avg_holding_hours': 15.0,
+            'total_equity': total_equity,
+            'weekly_pnl': weekly_pnl,
+            'weekly_pnl_pct': (weekly_pnl / initial_capital * 100) if initial_capital > 0 else 0,
+            'total_pnl': total_pnl,
+            'total_pnl_pct': (total_pnl / initial_capital * 100) if initial_capital > 0 else 0,
+            'trades_count': trades_count,
+            'winning_trades': winning_trades,
+            'losing_trades': losing_trades,
+            'win_rate': win_rate,
+            'total_profit': total_profit,
+            'total_loss': abs(total_loss),
+            'profit_factor': profit_factor,
+            'avg_holding_hours': avg_holding_hours,
             'daily_pnl_list': daily_pnl_list,
-            'max_drawdown_pct': 5.0,
-            'sharpe_ratio': 1.5,
-            # 通貨ペア別パフォーマンス
-            'pair_performance': {
-                'BTC/JPY': {
-                    'win_rate': 0.75,
-                    'profit_factor': 4.0,
-                    'sharpe_ratio': 1.8,
-                    'trades': 6
-                },
-                'ETH/JPY': {
-                    'win_rate': 0.60,
-                    'profit_factor': 2.5,
-                    'sharpe_ratio': 1.2,
-                    'trades': 4
-                }
-            }
+            'max_drawdown_pct': 0.0,  # 簡易実装
+            'sharpe_ratio': 0.0,  # 簡易実装
+            'pair_performance': pair_performance
         }
 
     def _get_monthly_data(self, start_date: datetime, end_date: datetime) -> Dict:
-        """月次データを取得（モック）"""
-        # TODO: 実際のDB取得ロジック実装
-        weekly_pnl_list = []
+        """月次データを取得（実DB）"""
+        import sqlite3
 
-        for week in range(1, 5):
-            weekly_pnl_list.append({
-                'week': week,
-                'pnl': 5000 + (week * 1000),
-                'pnl_pct': 2.5 + (week * 0.5)
-            })
+        start_str = start_date.strftime('%Y-%m-%d')
+        end_str = end_date.strftime('%Y-%m-%d')
+
+        initial_capital = 200000
+        try:
+            from pathlib import Path
+            import yaml
+            config_path = Path("config/config.yaml")
+            if config_path.exists():
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = yaml.safe_load(f)
+                    initial_capital = config.get('trading', {}).get('initial_capital', 200000)
+        except Exception:
+            pass
+
+        # 期間内の日次損益を取得
+        daily_pnl_df = self.db_manager.get_daily_pnl(start_str, end_str)
+
+        # 週別損益リスト作成
+        weekly_pnl_list = []
+        if not daily_pnl_df.empty:
+            daily_pnl_df['date'] = pd.to_datetime(daily_pnl_df['date'])
+            daily_pnl_df['week'] = daily_pnl_df['date'].dt.isocalendar().week
+
+            for week, group in daily_pnl_df.groupby('week'):
+                week_pnl = float(group['net_pnl'].sum())
+                weekly_pnl_list.append({
+                    'week': int(week),
+                    'pnl': week_pnl,
+                    'pnl_pct': (week_pnl / initial_capital * 100) if initial_capital > 0 else 0
+                })
+
+        # 集計値
+        trades_count = int(daily_pnl_df['total_trades'].sum()) if not daily_pnl_df.empty else 0
+        winning_trades = int(daily_pnl_df['winning_trades'].sum()) if not daily_pnl_df.empty else 0
+        losing_trades = int(daily_pnl_df['losing_trades'].sum()) if not daily_pnl_df.empty else 0
+        total_profit = float(daily_pnl_df['total_profit'].sum()) if not daily_pnl_df.empty else 0
+        total_loss = float(daily_pnl_df['total_loss'].sum()) if not daily_pnl_df.empty else 0
+        monthly_pnl = float(daily_pnl_df['net_pnl'].sum()) if not daily_pnl_df.empty else 0
+        win_rate = winning_trades / trades_count if trades_count > 0 else 0
+
+        # 累積損益
+        all_pnl_df = self.db_manager.get_daily_pnl('2000-01-01', end_str)
+        total_pnl = float(all_pnl_df['net_pnl'].sum()) if not all_pnl_df.empty else 0.0
+        total_equity = initial_capital + total_pnl
+
+        # 期間内のポジションを取得
+        conn = sqlite3.connect(self.db_manager.trades_db)
+
+        start_ts = int(start_date.timestamp())
+        end_ts = int(end_date.timestamp())
+
+        query = """
+        SELECT * FROM positions
+        WHERE status = 'closed'
+        AND exit_time >= ? AND exit_time <= ?
+        """
+
+        positions_df = pd.read_sql_query(query, conn, params=[start_ts, end_ts])
+
+        # 平均保有時間
+        avg_holding_hours = 0.0
+        if not positions_df.empty:
+            avg_holding_hours = float(positions_df['hold_time_hours'].mean())
+
+        # ベスト・ワーストトレード
+        best_trade = {'symbol': '-', 'side': '-', 'pnl': 0, 'pnl_pct': 0}
+        worst_trade = {'symbol': '-', 'side': '-', 'pnl': 0, 'pnl_pct': 0}
+
+        if not positions_df.empty:
+            best_idx = positions_df['profit_loss'].idxmax()
+            worst_idx = positions_df['profit_loss'].idxmin()
+
+            if pd.notna(best_idx):
+                best = positions_df.loc[best_idx]
+                best_trade = {
+                    'symbol': str(best.get('symbol', '-')),
+                    'side': str(best.get('side', '-')),
+                    'pnl': float(best.get('profit_loss', 0)),
+                    'pnl_pct': float(best.get('profit_loss_pct', 0))
+                }
+
+            if pd.notna(worst_idx):
+                worst = positions_df.loc[worst_idx]
+                worst_trade = {
+                    'symbol': str(worst.get('symbol', '-')),
+                    'side': str(worst.get('side', '-')),
+                    'pnl': float(worst.get('profit_loss', 0)),
+                    'pnl_pct': float(worst.get('profit_loss_pct', 0))
+                }
+
+        # 通貨ペア別パフォーマンス
+        pair_performance = {}
+
+        for symbol in ['BTC/JPY', 'ETH/JPY']:
+            symbol_positions = positions_df[positions_df['symbol'] == symbol]
+
+            if not symbol_positions.empty:
+                wins = len(symbol_positions[symbol_positions['profit_loss'] > 0])
+                total = len(symbol_positions)
+                profits = symbol_positions[symbol_positions['profit_loss'] > 0]['profit_loss'].sum()
+                losses = abs(symbol_positions[symbol_positions['profit_loss'] < 0]['profit_loss'].sum())
+
+                pair_performance[symbol] = {
+                    'win_rate': wins / total if total > 0 else 0,
+                    'profit_factor': profits / losses if losses > 0 else 0,
+                    'sharpe_ratio': 0.0,  # 簡易実装
+                    'trades': total
+                }
+
+        conn.close()
+
+        # ボラティリティ（日次損益の標準偏差）
+        volatility = 0.0
+        if not daily_pnl_df.empty and len(daily_pnl_df) > 1:
+            volatility = float(daily_pnl_df['net_pnl'].std())
+
+        profit_factor = abs(total_profit / total_loss) if total_loss != 0 else 0
 
         return {
-            'total_equity': 230000,
-            'monthly_pnl': 30000,
-            'monthly_pnl_pct': 15.0,
-            'total_pnl': 30000,
-            'total_pnl_pct': 15.0,
-            'trades_count': 40,
-            'winning_trades': 28,
-            'losing_trades': 12,
-            'win_rate': 0.7,
-            'total_profit': 50000,
-            'total_loss': 20000,
-            'profit_factor': 2.5,
-            'avg_holding_hours': 18.0,
+            'total_equity': total_equity,
+            'monthly_pnl': monthly_pnl,
+            'monthly_pnl_pct': (monthly_pnl / initial_capital * 100) if initial_capital > 0 else 0,
+            'total_pnl': total_pnl,
+            'total_pnl_pct': (total_pnl / initial_capital * 100) if initial_capital > 0 else 0,
+            'trades_count': trades_count,
+            'winning_trades': winning_trades,
+            'losing_trades': losing_trades,
+            'win_rate': win_rate,
+            'total_profit': total_profit,
+            'total_loss': abs(total_loss),
+            'profit_factor': profit_factor,
+            'avg_holding_hours': avg_holding_hours,
             'weekly_pnl_list': weekly_pnl_list,
-            'max_drawdown_pct': 8.0,
-            'sharpe_ratio': 1.8,
-            'volatility': 12.5,
-            'best_trade': {
-                'symbol': 'BTC/JPY',
-                'side': 'long',
-                'pnl': 15000,
-                'pnl_pct': 12.5
-            },
-            'worst_trade': {
-                'symbol': 'ETH/JPY',
-                'side': 'short',
-                'pnl': -5000,
-                'pnl_pct': -4.2
-            },
-            # 通貨ペア別パフォーマンス
-            'pair_performance': {
-                'BTC/JPY': {
-                    'win_rate': 0.72,
-                    'profit_factor': 3.2,
-                    'sharpe_ratio': 2.0,
-                    'trades': 24
-                },
-                'ETH/JPY': {
-                    'win_rate': 0.67,
-                    'profit_factor': 1.8,
-                    'sharpe_ratio': 1.5,
-                    'trades': 16
-                }
-            }
+            'max_drawdown_pct': 0.0,  # 簡易実装
+            'sharpe_ratio': 0.0,  # 簡易実装
+            'volatility': volatility,
+            'best_trade': best_trade,
+            'worst_trade': worst_trade,
+            'pair_performance': pair_performance
         }
 
 

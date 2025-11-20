@@ -526,6 +526,21 @@ class SQLiteManager:
     def close_all(self):
         """全接続をクローズ（実際にはSQLiteは自動管理）"""
         logger.info("SQLiteマネージャー終了")
+        # SQLiteは各メソッド内で接続を開閉しているため、
+        # 明示的にクローズする必要はないが、念のため確認
+        # 将来的に永続的接続を使う場合のために実装を用意
+
+    def close(self):
+        """close_all()のエイリアス"""
+        self.close_all()
+
+    def __del__(self):
+        """デストラクタでクリーンアップ"""
+        try:
+            self.close_all()
+        except Exception:
+            # デストラクタでの例外は無視
+            pass
 
 
 # シングルトンインスタンス

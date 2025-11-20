@@ -339,8 +339,11 @@ class RiskManager:
 
             # 連続損失制限に達した場合
             if self.consecutive_losses >= self.consecutive_loss_limit:
+                from datetime import datetime
                 self.trading_paused = True
+                self.pause_timestamp = datetime.now()
                 logger.error(f"連続損失制限到達！取引を一時停止します（{self.consecutive_losses}回連続損失）")
+                logger.info("24時間後に自動的に取引を再開します")
         else:
             # 利益が出たらリセット
             if self.consecutive_losses > 0:
@@ -396,7 +399,10 @@ class RiskManager:
         if daily_loss_pct <= -self.max_daily_loss_pct:
             msg = f"日次損失制限超過: {daily_loss_pct:.2f}% (制限: -{self.max_daily_loss_pct}%)"
             logger.error(msg)
+            from datetime import datetime
             self.trading_paused = True
+            self.pause_timestamp = datetime.now()
+            logger.info("24時間後に自動的に取引を再開します")
             return True, msg
 
         # 週次損失チェック
@@ -404,7 +410,10 @@ class RiskManager:
         if weekly_loss_pct <= -self.max_weekly_loss_pct:
             msg = f"週次損失制限超過: {weekly_loss_pct:.2f}% (制限: -{self.max_weekly_loss_pct}%)"
             logger.error(msg)
+            from datetime import datetime
             self.trading_paused = True
+            self.pause_timestamp = datetime.now()
+            logger.info("24時間後に自動的に取引を再開します")
             return True, msg
 
         # 月次損失チェック
@@ -412,10 +421,41 @@ class RiskManager:
         if monthly_loss_pct <= -self.max_monthly_loss_pct:
             msg = f"月次損失制限超過: {monthly_loss_pct:.2f}% (制限: -{self.max_monthly_loss_pct}%)"
             logger.error(msg)
+            from datetime import datetime
             self.trading_paused = True
+            self.pause_timestamp = datetime.now()
+            logger.info("24時間後に自動的に取引を再開します")
             return True, msg
 
         return False, "OK"
+
+    def check_auto_resume(self):
+        """
+        一時停止後24時間経過で自動再開をチェック
+
+        Returns:
+            再開した場合True
+        """
+        if not self.trading_paused or self.pause_timestamp is None:
+            return False
+
+        from datetime import datetime, timedelta
+
+        # 停止後24時間経過をチェック
+        hours_since_pause = (datetime.now() - self.pause_timestamp).total_seconds() / 3600
+
+        if hours_since_pause >= 24:
+            logger.info("=" * 70)
+            logger.info(f"一時停止から24時間経過（{hours_since_pause:.1f}時間）")
+            logger.info("取引を自動的に再開します")
+            logger.info("=" * 70)
+
+            # 取引再開
+            self.resume_trading()
+            self.pause_timestamp = None
+            return True
+
+        return False
 
     def is_trading_paused(self) -> Tuple[bool, str]:
         """

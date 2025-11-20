@@ -150,6 +150,118 @@ class CryptoTrader:
         logger.info("CryptoTrader 初期化完了")
         logger.info("=" * 70 + "\n")
 
+    def _check_models_exist(self) -> bool:
+        """モデルファイルの存在確認
+
+        Returns:
+            全てのモデルが存在する場合True
+        """
+        ml_models_dir = Path('ml_models')
+        ml_models_dir.mkdir(exist_ok=True)
+
+        all_exist = True
+        for pair_config in self.trading_pairs:
+            symbol = pair_config['symbol']
+            symbol_safe = symbol.replace("/", "_")
+
+            hmm_path = ml_models_dir / f'hmm_{symbol_safe}.pkl'
+            lgbm_path = ml_models_dir / f'lgbm_{symbol_safe}.pkl'
+
+            if not hmm_path.exists() or not lgbm_path.exists():
+                logger.info(f"  ⚠ {symbol} のモデルファイルが存在しません")
+                all_exist = False
+
+        return all_exist
+
+    def _train_initial_models(self):
+        """初回起動時のモデル学習"""
+        logger.info("=" * 70)
+        logger.info("初回モデル学習を開始します")
+        logger.info("=" * 70 + "\n")
+
+        ml_config = self.config.get('machine_learning', {})
+        training_days = ml_config.get('initial_training_days', 730)
+
+        for pair_config in self.trading_pairs:
+            symbol = pair_config['symbol']
+            symbol_safe = symbol.replace("/", "_")
+
+            logger.info(f"\n[{symbol}] モデル学習開始（過去{training_days}日間のデータ使用）")
+
+            try:
+                # 学習データ取得（1時間足）
+                limit = training_days * 24  # 時間数
+                logger.info(f"  → データ取得中: {limit}本の1時間足データ")
+
+                ohlcv_data = self.data_collector.fetch_ohlcv(symbol, '1h', limit)
+
+                if ohlcv_data is None or len(ohlcv_data) < 100:
+                    logger.error(f"  ✗ {symbol} データ取得失敗またはデータ不足")
+                    continue
+
+                # DataFrame作成
+                df = pd.DataFrame(
+                    ohlcv_data,
+                    columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+                )
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+
+                # テクニカル指標計算
+                logger.info(f"  → テクニカル指標計算中")
+                df = self.indicators.calculate_all_indicators(df)
+
+                # 特徴量エンジニアリング
+                logger.info(f"  → 特徴量エンジニアリング実行中")
+                df = self.feature_engineer.engineer_features(df)
+
+                # NaN除去
+                df = df.dropna()
+
+                if len(df) < 100:
+                    logger.error(f"  ✗ {symbol} 特徴量計算後のデータ不足")
+                    continue
+
+                logger.info(f"  → 学習データ準備完了: {len(df)}件")
+
+                # HMMモデル学習
+                logger.info(f"  → HMMモデル学習中...")
+                hmm_model = MarketRegimeHMM(n_states=3)
+                hmm_model.fit(df)
+                hmm_path = f'ml_models/hmm_{symbol_safe}.pkl'
+                hmm_model.save_model(hmm_path)
+                logger.info(f"  ✓ HMMモデル保存: {hmm_path}")
+
+                # LightGBMモデル学習
+                logger.info(f"  → LightGBMモデル学習中...")
+                lgbm_model = PriceDirectionLGBM()
+
+                # ターゲット作成（次のN時間後の価格方向）
+                df['target'] = (df['close'].shift(-1) > df['close']).astype(int)
+                df = df.dropna()
+
+                # 特徴量とターゲット分離
+                feature_cols = [col for col in df.columns if col not in [
+                    'timestamp', 'target', 'open', 'high', 'low', 'close', 'volume'
+                ]]
+                X = df[feature_cols]
+                y = df['target']
+
+                lgbm_model.fit(X, y)
+                lgbm_path = f'ml_models/lgbm_{symbol_safe}.pkl'
+                lgbm_model.save_model(lgbm_path)
+                logger.info(f"  ✓ LightGBMモデル保存: {lgbm_path}")
+
+                logger.info(f"\n[{symbol}] モデル学習完了 ✓\n")
+
+            except Exception as e:
+                logger.error(f"  ✗ {symbol} モデル学習エラー: {e}")
+                logger.error(traceback.format_exc())
+                continue
+
+        logger.info("=" * 70)
+        logger.info("初回モデル学習完了")
+        logger.info("=" * 70 + "\n")
+
     def load_models(self):
         """保存済みMLモデルを読み込み"""
         logger.info("MLモデル読み込み中...")
@@ -562,6 +674,13 @@ class CryptoTrader:
         logger.info(f"取引サイクル開始: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info("=" * 70)
 
+        # 自動再開チェック（24時間経過で自動的に取引再開）
+        if self.risk_manager.check_auto_resume():
+            self.notifier.notify_info(
+                "取引自動再開",
+                "一時停止から24時間経過したため、取引を自動的に再開しました。"
+            )
+
         try:
             # 各取引ペアで処理
             for pair_config in self.trading_pairs:
@@ -672,6 +791,55 @@ class CryptoTrader:
         except Exception as e:
             logger.error(f"月次レポート送信エラー: {e}")
 
+    def _verify_initial_balance(self):
+        """初期資産の検証
+
+        設定ファイルのinitial_capitalと実際の取引所残高を比較し、
+        大きな差異がある場合は警告を出す
+        """
+        try:
+            trading_config = self.config.get('trading', {})
+            initial_capital = trading_config.get('initial_capital', 200000)
+
+            # 取引所の実際の残高を取得
+            balance = self.data_collector.fetch_balance()
+
+            if balance is None:
+                logger.warning("  ⚠ 残高取得失敗 - 検証スキップ")
+                return
+
+            # JPY残高を取得
+            jpy_balance = balance.get('JPY', {}).get('free', 0)
+            total_balance = jpy_balance
+
+            # 暗号資産の時価評価額も追加
+            for symbol in ['BTC', 'ETH']:
+                if symbol in balance:
+                    crypto_amount = balance[symbol].get('free', 0)
+                    if crypto_amount > 0:
+                        # 現在価格取得
+                        ticker = self.data_collector.fetch_ticker(f'{symbol}/JPY')
+                        if ticker:
+                            current_price = ticker.get('last', 0)
+                            total_balance += crypto_amount * current_price
+
+            logger.info(f"  設定上の初期資本: ¥{initial_capital:,.0f}")
+            logger.info(f"  実際の取引所残高: ¥{total_balance:,.0f}")
+
+            # 差異を計算
+            difference_pct = abs(total_balance - initial_capital) / initial_capital * 100
+
+            if difference_pct > 10:
+                logger.warning(f"  ⚠ 警告: 設定値と実残高に{difference_pct:.1f}%の差異があります")
+                logger.warning(f"  リスク管理が正確に機能しない可能性があります")
+                logger.warning(f"  config.yaml の initial_capital を実残高に合わせて調整することを推奨します")
+            else:
+                logger.info(f"  ✓ 残高検証OK（差異: {difference_pct:.1f}%）")
+
+        except Exception as e:
+            logger.warning(f"  ⚠ 残高検証エラー: {e}")
+            logger.warning(f"  検証をスキップして続行します")
+
     def start(self, interval_minutes: int = 5):
         """取引ボット開始
 
@@ -695,8 +863,22 @@ class CryptoTrader:
         # パフォーマンストラッカー初期化
         self.performance_tracker = PerformanceTracker(self.db_manager)
 
+        # モデル存在チェック＆自動学習
+        logger.info("\n[モデル確認] MLモデルの存在確認中...")
+        if not self._check_models_exist():
+            logger.warning("モデルファイルが存在しません。初回学習を実行します。")
+            logger.warning("※ 学習には数分～数十分かかる場合があります")
+            self._train_initial_models()
+        else:
+            logger.info("  ✓ 全てのモデルファイルが存在します")
+
         # モデル読み込み
         self.load_models()
+
+        # 資産残高検証（本番モードのみ）
+        if not self.test_mode:
+            logger.info("\n[資産検証] 取引所残高確認中...")
+            self._verify_initial_balance()
 
         # Telegram Bot起動（コマンド受信用）
         self.telegram_bot.start()
@@ -855,6 +1037,10 @@ class CryptoTrader:
 
         # 最終レポート生成
         self.send_daily_report()
+
+        # データベース接続クローズ
+        logger.info("データベース接続をクローズ中...")
+        self.db_manager.close()
 
         logger.info("\nCryptoTrader 停止完了\n")
 

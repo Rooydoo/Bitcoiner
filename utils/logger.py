@@ -3,7 +3,7 @@
 import logging
 import sys
 from pathlib import Path
-from logging.handlers import TimedRotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler, RotatingFileHandler
 from typing import Optional
 
 
@@ -46,12 +46,12 @@ def setup_logger(
     logger.setLevel(level)
     logger.propagate = False
 
-    # ファイルハンドラー（7日ローテーション）
-    file_handler = TimedRotatingFileHandler(
+    # ファイルハンドラー（サイズベースのローテーション）
+    # 10MBごとにローテート、最大30ファイル保持
+    file_handler = RotatingFileHandler(
         filename=log_path,
-        when='midnight',  # 毎日深夜にローテート
-        interval=1,
-        backupCount=7,  # 7日分保持
+        maxBytes=10 * 1024 * 1024,  # 10MB
+        backupCount=30,  # 30ファイル保持（最大300MB）
         encoding='utf-8'
     )
     file_handler.setFormatter(formatter)

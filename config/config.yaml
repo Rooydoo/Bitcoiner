@@ -58,7 +58,7 @@ trading:
 
 # Telegram通知設定（.envで設定推奨）
 telegram:
-  enabled: false               # 通知有効化（APIキー設定時にtrue）
+  enabled: true                # 通知有効化（APIキー設定時にtrue）
   bot_token: null              # Bot Token（.env推奨）
   chat_id: null                # Chat ID（.env推奨）
 
