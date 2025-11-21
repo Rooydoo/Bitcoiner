@@ -327,6 +327,141 @@ class TelegramBotHandler:
             logger.error(f"set_stop_lossコマンドエラー: {e}")
             await self._send_reply(update, f"⚠️ エラー: {str(e)}")
 
+    async def cmd_allocation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """戦略配分確認コマンド"""
+        if not self._check_authorization(update):
+            await self._send_reply(update, "⛔ 認証エラー：このBotを使用する権限がありません")
+            return
+
+        try:
+            config_path = Path("config/config.yaml")
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+
+            alloc = config.get('strategy_allocation', {})
+            trading = config.get('trading', {})
+            initial_capital = trading.get('initial_capital', 200000)
+
+            crypto_ratio = alloc.get('crypto_ratio', 0.5)
+            trend_ratio = alloc.get('trend_ratio', 0.5)
+            coint_ratio = alloc.get('cointegration_ratio', 0.5)
+
+            crypto_capital = initial_capital * crypto_ratio
+            trend_capital = crypto_capital * trend_ratio
+            coint_capital = crypto_capital * coint_ratio
+            cash = initial_capital - crypto_capital
+
+            message = f"""
+📊 <b>戦略配分</b>
+━━━━━━━━━━━━━━━━
+
+💰 総資金: ¥{initial_capital:,.0f}
+
+<b>配分比率</b>
+• コイン投資: {crypto_ratio:.0%}
+• └ トレンド: {trend_ratio:.0%}
+• └ 共和分: {coint_ratio:.0%}
+
+<b>配分金額</b>
+• コイン: ¥{crypto_capital:,.0f}
+• └ トレンド: ¥{trend_capital:,.0f}
+• └ 共和分: ¥{coint_capital:,.0f}
+• 現金保持: ¥{cash:,.0f}
+
+<b>変更方法</b>
+/set_alloc crypto 0.6
+/set_alloc trend 0.5
+/set_alloc coint 0.5
+"""
+            await self._send_reply(update, message.strip())
+            logger.info(f"配分確認: Chat ID {update.effective_chat.id}")
+
+        except Exception as e:
+            logger.error(f"allocationコマンドエラー: {e}")
+            await self._send_reply(update, f"⚠️ エラー: {str(e)}")
+
+    async def cmd_set_allocation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """戦略配分変更コマンド"""
+        if not self._check_authorization(update):
+            await self._send_reply(update, "⛔ 認証エラー：このBotを使用する権限がありません")
+            return
+
+        try:
+            if len(context.args) != 2:
+                await self._send_reply(update, """❌ 使い方: /set_alloc <種類> <値>
+
+種類:
+• crypto - コイン投資比率
+• trend - トレンド戦略比率
+• coint - 共和分戦略比率
+
+例: /set_alloc crypto 0.6""")
+                return
+
+            alloc_type = context.args[0].lower()
+            new_value = float(context.args[1])
+
+            if new_value < 0.0 or new_value > 1.0:
+                await self._send_reply(update, "❌ 値は0.0～1.0の範囲で指定してください")
+                return
+
+            type_map = {
+                'crypto': 'crypto_ratio',
+                'trend': 'trend_ratio',
+                'coint': 'cointegration_ratio',
+                'cointegration': 'cointegration_ratio'
+            }
+
+            if alloc_type not in type_map:
+                await self._send_reply(update, "❌ 種類は crypto, trend, coint のいずれかを指定してください")
+                return
+
+            config_key = type_map[alloc_type]
+
+            # 設定ファイル更新
+            config_path = Path("config/config.yaml")
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+
+            if 'strategy_allocation' not in config:
+                config['strategy_allocation'] = {}
+
+            old_value = config['strategy_allocation'].get(config_key, 0.5)
+            config['strategy_allocation'][config_key] = new_value
+
+            # バックアップ作成
+            backup_path = config_path.parent / f"config.yaml.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            with open(backup_path, 'w', encoding='utf-8') as f:
+                yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
+
+            # 保存
+            with open(config_path, 'w', encoding='utf-8') as f:
+                yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
+
+            type_names = {
+                'crypto': 'コイン投資比率',
+                'trend': 'トレンド戦略比率',
+                'coint': '共和分戦略比率'
+            }
+
+            message = f"""
+✅ <b>配分変更完了</b>
+
+{type_names[alloc_type]}:
+{old_value:.0%} → <b>{new_value:.0%}</b>
+
+次回取引から適用されます。
+/allocation で確認できます
+"""
+            await self._send_reply(update, message.strip())
+            logger.info(f"配分変更: {alloc_type} {old_value} → {new_value} (Chat ID: {update.effective_chat.id})")
+
+        except ValueError:
+            await self._send_reply(update, "❌ 数値を正しく入力してください（例: 0.5）")
+        except Exception as e:
+            logger.error(f"set_allocationコマンドエラー: {e}")
+            await self._send_reply(update, f"⚠️ エラー: {str(e)}")
+
     async def cmd_commands(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """コマンド一覧（簡潔版）"""
         if not self._check_authorization(update):
@@ -339,9 +474,11 @@ class TelegramBotHandler:
 /status - 状態確認
 /positions - ポジション
 /config - 設定表示
+/allocation - 戦略配分確認
 /pause - 一時停止
 /resume - 再開
 /set_stop_loss <値> - 損切変更
+/set_alloc <種類> <値> - 配分変更
 /commands - この一覧
 /help - 詳細ヘルプ
 
@@ -402,9 +539,11 @@ class TelegramBotHandler:
                     BotCommand("status", "システム状態確認"),
                     BotCommand("positions", "保有ポジション一覧"),
                     BotCommand("config", "現在の設定表示"),
+                    BotCommand("allocation", "戦略配分確認"),
                     BotCommand("pause", "取引一時停止"),
                     BotCommand("resume", "取引再開"),
                     BotCommand("set_stop_loss", "損切ライン変更"),
+                    BotCommand("set_alloc", "戦略配分変更"),
                     BotCommand("commands", "コマンド一覧"),
                     BotCommand("help", "詳細ヘルプ"),
                 ]
@@ -425,7 +564,9 @@ class TelegramBotHandler:
                 self.application.add_handler(CommandHandler("resume", self.cmd_resume))
                 self.application.add_handler(CommandHandler("positions", self.cmd_positions))
                 self.application.add_handler(CommandHandler("config", self.cmd_config))
+                self.application.add_handler(CommandHandler("allocation", self.cmd_allocation))
                 self.application.add_handler(CommandHandler("set_stop_loss", self.cmd_set_stop_loss))
+                self.application.add_handler(CommandHandler("set_alloc", self.cmd_set_allocation))
                 self.application.add_handler(CommandHandler("commands", self.cmd_commands))
                 self.application.add_handler(CommandHandler("help", self.cmd_help))
                 self.application.add_handler(CommandHandler("start", self.cmd_commands))
