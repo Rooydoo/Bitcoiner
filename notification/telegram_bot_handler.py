@@ -433,11 +433,15 @@ class TelegramBotHandler:
                 config = yaml.safe_load(f)
 
             alloc = config.get('strategy_allocation', {})
-            trading = config.get('trading', {})
-            initial_capital = trading.get('initial_capital', 200000)
             crypto_ratio = alloc.get('crypto_ratio', 0.5)
 
-            target_crypto = initial_capital * crypto_ratio
+            # 実際の総資産を計算（現金 + ポジション評価額）
+            cash_balance = 0.0
+            try:
+                balance = self.trader.order_executor.get_balance('JPY')
+                cash_balance = balance.get('free', 0) + balance.get('used', 0)
+            except:
+                pass
 
             # 現在のポジション価値を計算
             positions = self.trader.position_manager.get_all_positions()
@@ -450,6 +454,9 @@ class TelegramBotHandler:
                 except:
                     pass
 
+            total_assets = cash_balance + current_crypto
+            target_crypto = total_assets * crypto_ratio
+
             excess = current_crypto - target_crypto
 
             # 確認メッセージ（引数なしの場合）
@@ -458,8 +465,9 @@ class TelegramBotHandler:
                     message = f"""
 ✅ <b>リバランス不要</b>
 
-目標: ¥{target_crypto:,.0f}
-現在: ¥{current_crypto:,.0f}
+総資産: ¥{total_assets:,.0f}
+目標コイン: ¥{target_crypto:,.0f} ({crypto_ratio:.0%})
+現在コイン: ¥{current_crypto:,.0f}
 
 超過分はありません。
 """
@@ -467,8 +475,9 @@ class TelegramBotHandler:
                     message = f"""
 ⚖️ <b>リバランス確認</b>
 
-目標配分: ¥{target_crypto:,.0f} ({crypto_ratio:.0%})
-現在保有: ¥{current_crypto:,.0f}
+総資産: ¥{total_assets:,.0f}
+目標コイン: ¥{target_crypto:,.0f} ({crypto_ratio:.0%})
+現在コイン: ¥{current_crypto:,.0f}
 超過分: <b>¥{excess:,.0f}</b>
 
 超過分を売却してリバランスします。
@@ -564,34 +573,55 @@ class TelegramBotHandler:
                 config = yaml.safe_load(f)
 
             alloc = config.get('strategy_allocation', {})
-            trading = config.get('trading', {})
-            initial_capital = trading.get('initial_capital', 200000)
+
+            # 実際の総資産を計算（現金 + ポジション評価額）
+            cash_balance = 0.0
+            position_value = 0.0
+
+            if self.trader:
+                try:
+                    balance = self.trader.order_executor.get_balance('JPY')
+                    cash_balance = balance.get('free', 0) + balance.get('used', 0)
+                except:
+                    pass
+
+                positions = self.trader.position_manager.get_all_positions()
+                for pos in positions:
+                    try:
+                        current_price = self.trader.order_executor.get_current_price(pos.symbol)
+                        position_value += pos.quantity * current_price
+                    except:
+                        pass
+
+            total_assets = cash_balance + position_value
 
             crypto_ratio = alloc.get('crypto_ratio', 0.5)
             trend_ratio = alloc.get('trend_ratio', 0.5)
             coint_ratio = alloc.get('cointegration_ratio', 0.5)
 
-            crypto_capital = initial_capital * crypto_ratio
-            trend_capital = crypto_capital * trend_ratio
-            coint_capital = crypto_capital * coint_ratio
-            cash = initial_capital - crypto_capital
+            target_crypto = total_assets * crypto_ratio
+            target_trend = target_crypto * trend_ratio
+            target_coint = target_crypto * coint_ratio
+            target_cash = total_assets - target_crypto
 
             message = f"""
 📊 <b>戦略配分</b>
 ━━━━━━━━━━━━━━━━
 
-💰 総資金: ¥{initial_capital:,.0f}
+💰 総資産: ¥{total_assets:,.0f}
+├ 現金: ¥{cash_balance:,.0f}
+└ ポジション: ¥{position_value:,.0f}
 
 <b>配分比率</b>
 • コイン投資: {crypto_ratio:.0%}
 • └ トレンド: {trend_ratio:.0%}
 • └ 共和分: {coint_ratio:.0%}
 
-<b>配分金額</b>
-• コイン: ¥{crypto_capital:,.0f}
-• └ トレンド: ¥{trend_capital:,.0f}
-• └ 共和分: ¥{coint_capital:,.0f}
-• 現金保持: ¥{cash:,.0f}
+<b>目標配分金額</b>
+• コイン: ¥{target_crypto:,.0f}
+• └ トレンド: ¥{target_trend:,.0f}
+• └ 共和分: ¥{target_coint:,.0f}
+• 現金保持: ¥{target_cash:,.0f}
 
 <b>変更方法</b>
 /set_alloc crypto 0.6
