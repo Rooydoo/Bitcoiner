@@ -327,6 +327,95 @@ class TelegramBotHandler:
             logger.error(f"set_stop_lossコマンドエラー: {e}")
             await self._send_reply(update, f"⚠️ エラー: {str(e)}")
 
+    async def cmd_close_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """全ポジションクローズコマンド"""
+        if not self._check_authorization(update):
+            await self._send_reply(update, "⛔ 認証エラー：このBotを使用する権限がありません")
+            return
+
+        try:
+            if not self.trader:
+                await self._send_reply(update, "⚠️ トレーダーインスタンスが未設定です")
+                return
+
+            positions = self.trader.position_manager.get_all_positions()
+
+            if not positions:
+                await self._send_reply(update, "📭 クローズするポジションがありません")
+                return
+
+            # 確認メッセージ（引数なしの場合）
+            if not context.args or context.args[0].lower() != 'confirm':
+                message = f"""
+⚠️ <b>全ポジションクローズ確認</b>
+
+{len(positions)}件のポジションをクローズします。
+
+"""
+                for pos in positions:
+                    message += f"• {pos.symbol} {pos.side.upper()}\n"
+
+                message += """
+<b>実行するには:</b>
+/close_all confirm
+"""
+                await self._send_reply(update, message.strip())
+                return
+
+            # 実行
+            closed_count = 0
+            total_pnl = 0.0
+            errors = []
+
+            for pos in positions:
+                try:
+                    current_price = self.trader.order_executor.get_current_price(pos.symbol)
+
+                    # クローズ注文
+                    if pos.side == 'long':
+                        order = self.trader.order_executor.create_market_sell(
+                            pos.symbol, pos.quantity
+                        )
+                    else:
+                        order = self.trader.order_executor.create_market_buy(
+                            pos.symbol, pos.quantity
+                        )
+
+                    if order:
+                        pnl = pos.calculate_unrealized_pnl(current_price)
+                        total_pnl += pnl
+                        self.trader.position_manager.close_position(pos.symbol)
+                        closed_count += 1
+                        logger.info(f"ポジションクローズ: {pos.symbol} PnL={pnl:.0f}")
+                except Exception as e:
+                    errors.append(f"{pos.symbol}: {str(e)}")
+                    logger.error(f"クローズエラー: {pos.symbol} - {e}")
+
+            # 取引一時停止
+            self.trader.risk_manager.trading_paused = True
+
+            pnl_emoji = "📈" if total_pnl >= 0 else "📉"
+            message = f"""
+🔴 <b>全ポジションクローズ完了</b>
+
+クローズ: {closed_count}/{len(positions)}件
+{pnl_emoji} 実現損益: <b>¥{total_pnl:,.0f}</b>
+
+⏸️ 取引を一時停止しました
+再開: /resume
+"""
+            if errors:
+                message += f"\n⚠️ エラー: {len(errors)}件\n"
+                for err in errors[:3]:
+                    message += f"• {err}\n"
+
+            await self._send_reply(update, message.strip())
+            logger.warning(f"全ポジションクローズ実行: {closed_count}件 (Chat ID: {update.effective_chat.id})")
+
+        except Exception as e:
+            logger.error(f"close_allコマンドエラー: {e}")
+            await self._send_reply(update, f"⚠️ エラー: {str(e)}")
+
     async def cmd_allocation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """戦略配分確認コマンド"""
         if not self._check_authorization(update):
@@ -477,6 +566,7 @@ class TelegramBotHandler:
 /allocation - 戦略配分確認
 /pause - 一時停止
 /resume - 再開
+/close_all - 全ポジション売却
 /set_stop_loss <値> - 損切変更
 /set_alloc <種類> <値> - 配分変更
 /commands - この一覧
@@ -542,6 +632,7 @@ class TelegramBotHandler:
                     BotCommand("allocation", "戦略配分確認"),
                     BotCommand("pause", "取引一時停止"),
                     BotCommand("resume", "取引再開"),
+                    BotCommand("close_all", "全ポジション売却"),
                     BotCommand("set_stop_loss", "損切ライン変更"),
                     BotCommand("set_alloc", "戦略配分変更"),
                     BotCommand("commands", "コマンド一覧"),
@@ -565,6 +656,7 @@ class TelegramBotHandler:
                 self.application.add_handler(CommandHandler("positions", self.cmd_positions))
                 self.application.add_handler(CommandHandler("config", self.cmd_config))
                 self.application.add_handler(CommandHandler("allocation", self.cmd_allocation))
+                self.application.add_handler(CommandHandler("close_all", self.cmd_close_all))
                 self.application.add_handler(CommandHandler("set_stop_loss", self.cmd_set_stop_loss))
                 self.application.add_handler(CommandHandler("set_alloc", self.cmd_set_allocation))
                 self.application.add_handler(CommandHandler("commands", self.cmd_commands))
