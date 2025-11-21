@@ -36,6 +36,8 @@ class PairPosition:
     entry_price1: float
     entry_price2: float
     unrealized_pnl: float = 0.0
+    max_pnl: float = 0.0  # 最高到達利益（トレーリング用）
+    entry_capital: float = 0.0  # エントリー時の投入資金
 
 
 @dataclass
@@ -50,6 +52,10 @@ class PairTradingConfig:
     rebalance_interval: int = 24  # 時間
     min_half_life: float = 5.0  # 最小半減期（日）
     max_half_life: float = 60.0  # 最大半減期（日）
+    # 利益確定パラメータ
+    take_profit_pct: float = 0.03  # 3%で利確
+    trailing_stop_pct: float = 0.015  # 1.5%トレーリングストップ
+    min_profit_pct: float = 0.005  # 最低0.5%は確保
 
 
 class PairTradingStrategy:
@@ -197,9 +203,32 @@ class PairTradingStrategy:
         Returns:
             (エグジットすべきか, 理由)
         """
-        # 平均回帰でクローズ
+        # 利益率計算
+        if position.entry_capital > 0:
+            profit_pct = position.unrealized_pnl / position.entry_capital
+        else:
+            profit_pct = 0.0
+
+        # 利益確定（目標利益達成）
+        if profit_pct >= self.config.take_profit_pct:
+            return True, 'take_profit'
+
+        # トレーリングストップ（最高利益から一定%下落）
+        if position.max_pnl > 0 and position.entry_capital > 0:
+            max_profit_pct = position.max_pnl / position.entry_capital
+            if max_profit_pct >= self.config.min_profit_pct:
+                # 最高利益から下落した場合
+                drawdown = position.max_pnl - position.unrealized_pnl
+                if drawdown >= position.entry_capital * self.config.trailing_stop_pct:
+                    return True, 'trailing_stop'
+
+        # 平均回帰でクローズ（利益が出ている場合のみ）
         if signal.signal == 'close':
-            return True, 'mean_reversion'
+            if profit_pct >= self.config.min_profit_pct:
+                return True, 'mean_reversion_profit'
+            # 利益が出ていなくてもZスコアが十分小さければクローズ
+            if abs(signal.z_score) < self.config.z_score_exit * 0.5:
+                return True, 'mean_reversion'
 
         # ストップロス
         if abs(signal.z_score) > self.config.z_score_stop_loss:
@@ -237,6 +266,9 @@ class PairTradingStrategy:
         pair_id = f"{pair.symbol1}_{pair.symbol2}"
         size1, size2 = self.calculate_position_sizes(pair, capital, price1, price2)
 
+        # 投入資金を計算
+        entry_capital = size1 * price1 + size2 * price2
+
         position = PairPosition(
             pair_id=pair_id,
             symbol1=pair.symbol1,
@@ -249,7 +281,8 @@ class PairTradingStrategy:
             size1=size1,
             size2=size2,
             entry_price1=price1,
-            entry_price2=price2
+            entry_price2=price2,
+            entry_capital=entry_capital
         )
 
         self.positions[pair_id] = position
@@ -329,6 +362,10 @@ class PairTradingStrategy:
 
             position.unrealized_pnl = pnl1 + pnl2
             total_pnl += position.unrealized_pnl
+
+            # 最高利益を更新（トレーリングストップ用）
+            if position.unrealized_pnl > position.max_pnl:
+                position.max_pnl = position.unrealized_pnl
 
         return total_pnl
 

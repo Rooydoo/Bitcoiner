@@ -39,6 +39,15 @@ position:
   # 最小注文サイズ（JPY）
   min_order_size: 1000
 
+# 利益確定パラメータ
+take_profit:
+  # 目標利益率（3%で利確）
+  take_profit_pct: 0.03
+  # トレーリングストップ幅（最高利益から1.5%下落で利確）
+  trailing_stop_pct: 0.015
+  # 最低確保利益率（0.5%以上で平均回帰クローズ許可）
+  min_profit_pct: 0.005
+
 # リスク管理
 risk:
   # 最大ドローダウン（%）
