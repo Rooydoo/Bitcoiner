@@ -166,10 +166,41 @@ class SQLiteManager:
         )
         """)
 
+        # ペアポジションテーブル（共和分戦略用）
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS pair_positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair_id TEXT UNIQUE NOT NULL,
+            symbol1 TEXT NOT NULL,
+            symbol2 TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            hedge_ratio REAL NOT NULL,
+            entry_spread REAL NOT NULL,
+            entry_z_score REAL NOT NULL,
+            entry_time INTEGER NOT NULL,
+            size1 REAL NOT NULL,
+            size2 REAL NOT NULL,
+            entry_price1 REAL NOT NULL,
+            entry_price2 REAL NOT NULL,
+            entry_capital REAL NOT NULL,
+            exit_price1 REAL,
+            exit_price2 REAL,
+            exit_time INTEGER,
+            exit_reason TEXT,
+            unrealized_pnl REAL DEFAULT 0,
+            realized_pnl REAL,
+            max_pnl REAL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'open',
+            created_at INTEGER DEFAULT (strftime('%s', 'now')),
+            updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+        )
+        """)
+
         # インデックス作成
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_time ON trades(symbol, timestamp)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_daily_pnl_date ON daily_pnl(date)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_pair_positions_status ON pair_positions(status)")
 
         conn.commit()
         conn.close()
@@ -380,6 +411,136 @@ class SQLiteManager:
         conn.close()
 
         logger.debug(f"ポジション更新: {position_id}")
+
+    # ========== ペアポジション操作メソッド ==========
+
+    def create_pair_position(self, position_data: Dict[str, Any]) -> str:
+        """
+        新規ペアポジションを作成
+
+        Args:
+            position_data: ペアポジションデータ
+
+        Returns:
+            ペアID
+        """
+        conn = sqlite3.connect(self.trades_db)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+        INSERT INTO pair_positions (
+            pair_id, symbol1, symbol2, direction, hedge_ratio,
+            entry_spread, entry_z_score, entry_time,
+            size1, size2, entry_price1, entry_price2, entry_capital, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            position_data['pair_id'],
+            position_data['symbol1'],
+            position_data['symbol2'],
+            position_data['direction'],
+            position_data['hedge_ratio'],
+            position_data['entry_spread'],
+            position_data['entry_z_score'],
+            position_data['entry_time'],
+            position_data['size1'],
+            position_data['size2'],
+            position_data['entry_price1'],
+            position_data['entry_price2'],
+            position_data['entry_capital'],
+            'open'
+        ))
+
+        conn.commit()
+        conn.close()
+
+        logger.info(f"ペアポジション作成: {position_data['pair_id']}")
+        return position_data['pair_id']
+
+    def update_pair_position(self, pair_id: str, updates: Dict[str, Any]):
+        """
+        ペアポジションを更新
+
+        Args:
+            pair_id: ペアID
+            updates: 更新データ
+        """
+        conn = sqlite3.connect(self.trades_db)
+        cursor = conn.cursor()
+
+        set_clause = ", ".join([f"{key} = ?" for key in updates.keys()])
+        set_clause += ", updated_at = strftime('%s', 'now')"
+
+        query = f"UPDATE pair_positions SET {set_clause} WHERE pair_id = ?"
+        values = list(updates.values()) + [pair_id]
+
+        cursor.execute(query, values)
+        conn.commit()
+        conn.close()
+
+        logger.debug(f"ペアポジション更新: {pair_id}")
+
+    def close_pair_position(self, pair_id: str, exit_data: Dict[str, Any]):
+        """
+        ペアポジションをクローズ
+
+        Args:
+            pair_id: ペアID
+            exit_data: 決済データ
+        """
+        updates = {
+            'exit_price1': exit_data['exit_price1'],
+            'exit_price2': exit_data['exit_price2'],
+            'exit_time': exit_data['exit_time'],
+            'exit_reason': exit_data['exit_reason'],
+            'realized_pnl': exit_data['realized_pnl'],
+            'status': 'closed'
+        }
+        self.update_pair_position(pair_id, updates)
+        logger.info(f"ペアポジションクローズ: {pair_id} 損益=¥{exit_data['realized_pnl']:,.0f}")
+
+    def get_open_pair_positions(self) -> List[Dict[str, Any]]:
+        """
+        オープン中のペアポジションを取得
+
+        Returns:
+            ペアポジションのリスト
+        """
+        conn = sqlite3.connect(self.trades_db)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+        SELECT * FROM pair_positions WHERE status = 'open'
+        """)
+
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+        conn.close()
+
+        return [dict(zip(columns, row)) for row in rows]
+
+    def get_pair_position(self, pair_id: str) -> Optional[Dict[str, Any]]:
+        """
+        特定のペアポジションを取得
+
+        Args:
+            pair_id: ペアID
+
+        Returns:
+            ペアポジションデータ or None
+        """
+        conn = sqlite3.connect(self.trades_db)
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM pair_positions WHERE pair_id = ?", (pair_id,))
+        row = cursor.fetchone()
+
+        if row:
+            columns = [desc[0] for desc in cursor.description]
+            conn.close()
+            return dict(zip(columns, row))
+
+        conn.close()
+        return None
 
     # ========== データ取得メソッド ==========
 

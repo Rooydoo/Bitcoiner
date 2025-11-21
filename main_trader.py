@@ -842,12 +842,51 @@ class CryptoTrader:
                 logger.info(f"      {position.symbol1}: {position.size1:.6f}")
                 logger.info(f"      {position.symbol2}: {position.size2:.6f}")
 
+                # データベースに永続化
+                self.db_manager.create_pair_position({
+                    'pair_id': position.pair_id,
+                    'symbol1': position.symbol1,
+                    'symbol2': position.symbol2,
+                    'direction': position.direction,
+                    'hedge_ratio': position.hedge_ratio,
+                    'entry_spread': position.entry_spread,
+                    'entry_z_score': position.entry_z_score,
+                    'entry_time': int(position.entry_time.timestamp()),
+                    'size1': position.size1,
+                    'size2': position.size2,
+                    'entry_price1': position.entry_price1,
+                    'entry_price2': position.entry_price2,
+                    'entry_capital': position.entry_capital
+                })
+
+                # Telegram通知
+                self.notifier.notify_pair_trade_open(
+                    pair_id=position.pair_id,
+                    symbol1=position.symbol1,
+                    symbol2=position.symbol2,
+                    direction=position.direction,
+                    size1=position.size1,
+                    size2=position.size2,
+                    price1=price1,
+                    price2=price2,
+                    z_score=signal.z_score,
+                    hedge_ratio=signal.hedge_ratio
+                )
+
         except Exception as e:
             logger.error(f"ペアエントリーエラー: {e}")
 
     def _close_pair_position(self, position, price1: float, price2: float, reason: str):
         """ペアポジションクローズ"""
         try:
+            # 保有期間計算
+            hold_duration = None
+            if hasattr(position, 'entry_time') and position.entry_time:
+                duration = datetime.now() - position.entry_time
+                hours = int(duration.total_seconds() // 3600)
+                minutes = int((duration.total_seconds() % 3600) // 60)
+                hold_duration = f"{hours}時間{minutes}分"
+
             closed_position, pnl = self.pair_trading_strategy.close_position(
                 position.pair_id, price1, price2, reason
             )
@@ -855,9 +894,28 @@ class CryptoTrader:
             logger.info(f"    ✓ ペアポジション終了: {position.pair_id}")
             logger.info(f"      損益: ¥{pnl:,.0f} ({reason})")
 
+            # データベースに永続化
+            self.db_manager.close_pair_position(position.pair_id, {
+                'exit_price1': price1,
+                'exit_price2': price2,
+                'exit_time': int(datetime.now().timestamp()),
+                'exit_reason': reason,
+                'realized_pnl': pnl
+            })
+
             # リスク管理に記録
             initial_capital = self.config.get('trading', {}).get('initial_capital', 200000)
             self.risk_manager.record_trade_result(pnl, initial_capital)
+
+            # Telegram通知
+            self.notifier.notify_pair_trade_close(
+                pair_id=position.pair_id,
+                symbol1=position.symbol1,
+                symbol2=position.symbol2,
+                pnl=pnl,
+                reason=reason,
+                hold_duration=hold_duration
+            )
 
         except Exception as e:
             logger.error(f"ペアクローズエラー: {e}")

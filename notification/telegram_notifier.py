@@ -295,6 +295,137 @@ class TelegramNotifier:
         self.send_message(message.strip())
         logger.error(f"エラー通知送信: {error_type}")
 
+    def notify_info(self, title: str, message: str):
+        """
+        情報通知
+
+        Args:
+            title: タイトル
+            message: メッセージ
+        """
+        full_message = f"""
+ℹ️ <b>{title}</b>
+
+{message}
+
+⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+        self.send_message(full_message.strip())
+        logger.info(f"情報通知送信: {title}")
+
+    def notify_pair_trade_open(
+        self,
+        pair_id: str,
+        symbol1: str,
+        symbol2: str,
+        direction: str,
+        size1: float,
+        size2: float,
+        price1: float,
+        price2: float,
+        z_score: float,
+        hedge_ratio: float
+    ):
+        """
+        ペアトレード開始通知
+
+        Args:
+            pair_id: ペアID
+            symbol1: 資産1シンボル
+            symbol2: 資産2シンボル
+            direction: 'long_spread' or 'short_spread'
+            size1: 資産1サイズ
+            size2: 資産2サイズ
+            price1: 資産1価格
+            price2: 資産2価格
+            z_score: Zスコア
+            hedge_ratio: ヘッジ比率
+        """
+        if direction == 'long_spread':
+            dir_jp = "ロングスプレッド"
+            emoji = "🟢"
+        else:
+            dir_jp = "ショートスプレッド"
+            emoji = "🔴"
+
+        total_value = size1 * price1 + size2 * price2
+
+        message = f"""
+{emoji} <b>ペアトレード開始</b>
+
+📊 {pair_id}
+方向: {dir_jp}
+
+<b>{symbol1}</b>
+├ 数量: {size1:.6f}
+└ 価格: ¥{price1:,.0f}
+
+<b>{symbol2}</b>
+├ 数量: {size2:.6f}
+└ 価格: ¥{price2:,.0f}
+
+Zスコア: {z_score:.2f}
+ヘッジ比率: {hedge_ratio:.4f}
+投入資金: ¥{total_value:,.0f}
+
+⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+        self.send_message(message.strip())
+        logger.info(f"ペアトレード開始通知: {pair_id}")
+
+    def notify_pair_trade_close(
+        self,
+        pair_id: str,
+        symbol1: str,
+        symbol2: str,
+        pnl: float,
+        reason: str,
+        hold_duration: Optional[str] = None
+    ):
+        """
+        ペアトレード終了通知
+
+        Args:
+            pair_id: ペアID
+            symbol1: 資産1シンボル
+            symbol2: 資産2シンボル
+            pnl: 損益
+            reason: 終了理由
+            hold_duration: 保有期間
+        """
+        if pnl > 0:
+            emoji = "🎉"
+            result = "利益確定"
+        else:
+            emoji = "⚠️"
+            result = "損切り"
+
+        reason_jp = {
+            'take_profit': '利益目標達成',
+            'trailing_stop': 'トレーリングストップ',
+            'mean_reversion': '平均回帰',
+            'mean_reversion_profit': '平均回帰（利益）',
+            'stop_loss': 'ストップロス',
+            'direction_change': '方向転換'
+        }.get(reason, reason)
+
+        message = f"""
+{emoji} <b>ペアトレード{result}</b>
+
+📊 {pair_id}
+{symbol1} / {symbol2}
+
+💰 損益: <b>¥{pnl:,.0f}</b>
+📝 理由: {reason_jp}
+"""
+        if hold_duration:
+            message += f"⏱️ 保有期間: {hold_duration}\n"
+
+        message += f"\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+
+        self.send_message(message.strip())
+        logger.info(f"ペアトレード終了通知: {pair_id} 損益=¥{pnl:,.0f}")
+
 
 # ヘルパー関数
 def create_telegram_notifier(
