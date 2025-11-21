@@ -23,7 +23,7 @@ class DataCollectionOrchestrator:
         Args:
             symbols: 取引ペアのリスト（例: ['BTC/JPY', 'ETH/JPY']）
         """
-        self.symbols = symbols or ['BTC/JPY', 'ETH/JPY']
+        self.symbols = symbols or ['BTC/JPY', 'ETH/JPY', 'XRP/JPY', 'LTC/JPY']
         self.collector = BitflyerDataCollector()
         self.db = get_db_manager()
         self.ti = TechnicalIndicators()

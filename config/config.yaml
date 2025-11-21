@@ -56,6 +56,12 @@ trading:
   min_confidence: 0.6          # 最小シグナル信頼度（60%以上でエントリー）
   trading_interval_minutes: 5  # 取引サイクル間隔（分）
 
+# 戦略配分設定
+strategy_allocation:
+  crypto_ratio: 0.50           # 総資金のうちコイン投資に使う割合（50%）
+  trend_ratio: 0.50            # コイン資金のうちトレンド戦略に使う割合（50%）
+  cointegration_ratio: 0.50    # コイン資金のうち共和分戦略に使う割合（50%）
+
 # Telegram通知設定（.envで設定推奨）
 telegram:
   enabled: true                # 通知有効化（APIキー設定時にtrue）

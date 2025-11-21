@@ -327,6 +327,396 @@ class TelegramBotHandler:
             logger.error(f"set_stop_lossコマンドエラー: {e}")
             await self._send_reply(update, f"⚠️ エラー: {str(e)}")
 
+    async def cmd_close_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """全ポジションクローズコマンド"""
+        if not self._check_authorization(update):
+            await self._send_reply(update, "⛔ 認証エラー：このBotを使用する権限がありません")
+            return
+
+        try:
+            if not self.trader:
+                await self._send_reply(update, "⚠️ トレーダーインスタンスが未設定です")
+                return
+
+            positions = self.trader.position_manager.get_all_positions()
+
+            if not positions:
+                await self._send_reply(update, "📭 クローズするポジションがありません")
+                return
+
+            # 確認メッセージ（引数なしの場合）
+            if not context.args or context.args[0].lower() != 'confirm':
+                message = f"""
+⚠️ <b>全ポジションクローズ確認</b>
+
+{len(positions)}件のポジションをクローズします。
+
+"""
+                for pos in positions:
+                    message += f"• {pos.symbol} {pos.side.upper()}\n"
+
+                message += """
+<b>実行するには:</b>
+/close_all confirm
+"""
+                await self._send_reply(update, message.strip())
+                return
+
+            # 実行
+            closed_count = 0
+            total_pnl = 0.0
+            errors = []
+
+            for pos in positions:
+                try:
+                    current_price = self.trader.order_executor.get_current_price(pos.symbol)
+
+                    # クローズ注文
+                    if pos.side == 'long':
+                        order = self.trader.order_executor.create_market_sell(
+                            pos.symbol, pos.quantity
+                        )
+                    else:
+                        order = self.trader.order_executor.create_market_buy(
+                            pos.symbol, pos.quantity
+                        )
+
+                    if order:
+                        pnl = pos.calculate_unrealized_pnl(current_price)
+                        total_pnl += pnl
+                        self.trader.position_manager.close_position(pos.symbol)
+                        closed_count += 1
+                        logger.info(f"ポジションクローズ: {pos.symbol} PnL={pnl:.0f}")
+                except Exception as e:
+                    errors.append(f"{pos.symbol}: {str(e)}")
+                    logger.error(f"クローズエラー: {pos.symbol} - {e}")
+
+            # 取引一時停止
+            self.trader.risk_manager.trading_paused = True
+
+            pnl_emoji = "📈" if total_pnl >= 0 else "📉"
+            message = f"""
+🔴 <b>全ポジションクローズ完了</b>
+
+クローズ: {closed_count}/{len(positions)}件
+{pnl_emoji} 実現損益: <b>¥{total_pnl:,.0f}</b>
+
+⏸️ 取引を一時停止しました
+再開: /resume
+"""
+            if errors:
+                message += f"\n⚠️ エラー: {len(errors)}件\n"
+                for err in errors[:3]:
+                    message += f"• {err}\n"
+
+            await self._send_reply(update, message.strip())
+            logger.warning(f"全ポジションクローズ実行: {closed_count}件 (Chat ID: {update.effective_chat.id})")
+
+        except Exception as e:
+            logger.error(f"close_allコマンドエラー: {e}")
+            await self._send_reply(update, f"⚠️ エラー: {str(e)}")
+
+    async def cmd_rebalance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """リバランスコマンド（配分に合わせて超過分を売却）"""
+        if not self._check_authorization(update):
+            await self._send_reply(update, "⛔ 認証エラー：このBotを使用する権限がありません")
+            return
+
+        try:
+            if not self.trader:
+                await self._send_reply(update, "⚠️ トレーダーインスタンスが未設定です")
+                return
+
+            # 設定読み込み
+            config_path = Path("config/config.yaml")
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+
+            alloc = config.get('strategy_allocation', {})
+            crypto_ratio = alloc.get('crypto_ratio', 0.5)
+
+            # 実際の総資産を計算（現金 + ポジション評価額）
+            cash_balance = 0.0
+            try:
+                balance = self.trader.order_executor.get_balance('JPY')
+                cash_balance = balance.get('free', 0) + balance.get('used', 0)
+            except:
+                pass
+
+            # 現在のポジション価値を計算
+            positions = self.trader.position_manager.get_all_positions()
+            current_crypto = 0.0
+
+            for pos in positions:
+                try:
+                    current_price = self.trader.order_executor.get_current_price(pos.symbol)
+                    current_crypto += pos.quantity * current_price
+                except:
+                    pass
+
+            total_assets = cash_balance + current_crypto
+            target_crypto = total_assets * crypto_ratio
+
+            excess = current_crypto - target_crypto
+
+            # 確認メッセージ（引数なしの場合）
+            if not context.args or context.args[0].lower() != 'confirm':
+                if excess <= 0:
+                    message = f"""
+✅ <b>リバランス不要</b>
+
+総資産: ¥{total_assets:,.0f}
+目標コイン: ¥{target_crypto:,.0f} ({crypto_ratio:.0%})
+現在コイン: ¥{current_crypto:,.0f}
+
+超過分はありません。
+"""
+                else:
+                    message = f"""
+⚖️ <b>リバランス確認</b>
+
+総資産: ¥{total_assets:,.0f}
+目標コイン: ¥{target_crypto:,.0f} ({crypto_ratio:.0%})
+現在コイン: ¥{current_crypto:,.0f}
+超過分: <b>¥{excess:,.0f}</b>
+
+超過分を売却してリバランスします。
+
+<b>実行するには:</b>
+/rebalance confirm
+"""
+                await self._send_reply(update, message.strip())
+                return
+
+            if excess <= 0:
+                await self._send_reply(update, "✅ リバランス不要です（超過分なし）")
+                return
+
+            # リバランス実行（超過分を売却）
+            sold_amount = 0.0
+            errors = []
+
+            # ポジションを価値順にソート（大きいものから売却）
+            pos_with_value = []
+            for pos in positions:
+                try:
+                    current_price = self.trader.order_executor.get_current_price(pos.symbol)
+                    value = pos.quantity * current_price
+                    pos_with_value.append((pos, current_price, value))
+                except Exception as e:
+                    errors.append(f"{pos.symbol}: 価格取得失敗")
+
+            pos_with_value.sort(key=lambda x: x[2], reverse=True)
+
+            remaining_excess = excess
+            for pos, current_price, value in pos_with_value:
+                if remaining_excess <= 0:
+                    break
+
+                # 売却数量を計算
+                sell_value = min(remaining_excess, value)
+                sell_qty = sell_value / current_price
+
+                try:
+                    if pos.side == 'long':
+                        order = self.trader.order_executor.create_market_sell(
+                            pos.symbol, sell_qty
+                        )
+                    else:
+                        order = self.trader.order_executor.create_market_buy(
+                            pos.symbol, sell_qty
+                        )
+
+                    if order:
+                        sold_amount += sell_value
+                        remaining_excess -= sell_value
+
+                        # ポジション更新
+                        if sell_qty >= pos.quantity:
+                            self.trader.position_manager.close_position(pos.symbol)
+                        else:
+                            pos.quantity -= sell_qty
+
+                        logger.info(f"リバランス売却: {pos.symbol} ¥{sell_value:,.0f}")
+                except Exception as e:
+                    errors.append(f"{pos.symbol}: {str(e)}")
+
+            message = f"""
+⚖️ <b>リバランス完了</b>
+
+売却額: <b>¥{sold_amount:,.0f}</b>
+目標との差: ¥{remaining_excess:,.0f}
+
+/allocation で確認できます
+"""
+            if errors:
+                message += f"\n⚠️ エラー: {len(errors)}件\n"
+                for err in errors[:3]:
+                    message += f"• {err}\n"
+
+            await self._send_reply(update, message.strip())
+            logger.info(f"リバランス実行: ¥{sold_amount:,.0f} (Chat ID: {update.effective_chat.id})")
+
+        except Exception as e:
+            logger.error(f"rebalanceコマンドエラー: {e}")
+            await self._send_reply(update, f"⚠️ エラー: {str(e)}")
+
+    async def cmd_allocation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """戦略配分確認コマンド"""
+        if not self._check_authorization(update):
+            await self._send_reply(update, "⛔ 認証エラー：このBotを使用する権限がありません")
+            return
+
+        try:
+            config_path = Path("config/config.yaml")
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+
+            alloc = config.get('strategy_allocation', {})
+
+            # 実際の総資産を計算（現金 + ポジション評価額）
+            cash_balance = 0.0
+            position_value = 0.0
+
+            if self.trader:
+                try:
+                    balance = self.trader.order_executor.get_balance('JPY')
+                    cash_balance = balance.get('free', 0) + balance.get('used', 0)
+                except:
+                    pass
+
+                positions = self.trader.position_manager.get_all_positions()
+                for pos in positions:
+                    try:
+                        current_price = self.trader.order_executor.get_current_price(pos.symbol)
+                        position_value += pos.quantity * current_price
+                    except:
+                        pass
+
+            total_assets = cash_balance + position_value
+
+            crypto_ratio = alloc.get('crypto_ratio', 0.5)
+            trend_ratio = alloc.get('trend_ratio', 0.5)
+            coint_ratio = alloc.get('cointegration_ratio', 0.5)
+
+            target_crypto = total_assets * crypto_ratio
+            target_trend = target_crypto * trend_ratio
+            target_coint = target_crypto * coint_ratio
+            target_cash = total_assets - target_crypto
+
+            message = f"""
+📊 <b>戦略配分</b>
+━━━━━━━━━━━━━━━━
+
+💰 総資産: ¥{total_assets:,.0f}
+├ 現金: ¥{cash_balance:,.0f}
+└ ポジション: ¥{position_value:,.0f}
+
+<b>配分比率</b>
+• コイン投資: {crypto_ratio:.0%}
+• └ トレンド: {trend_ratio:.0%}
+• └ 共和分: {coint_ratio:.0%}
+
+<b>目標配分金額</b>
+• コイン: ¥{target_crypto:,.0f}
+• └ トレンド: ¥{target_trend:,.0f}
+• └ 共和分: ¥{target_coint:,.0f}
+• 現金保持: ¥{target_cash:,.0f}
+
+<b>変更方法</b>
+/set_alloc crypto 0.6
+/set_alloc trend 0.5
+/set_alloc coint 0.5
+"""
+            await self._send_reply(update, message.strip())
+            logger.info(f"配分確認: Chat ID {update.effective_chat.id}")
+
+        except Exception as e:
+            logger.error(f"allocationコマンドエラー: {e}")
+            await self._send_reply(update, f"⚠️ エラー: {str(e)}")
+
+    async def cmd_set_allocation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """戦略配分変更コマンド"""
+        if not self._check_authorization(update):
+            await self._send_reply(update, "⛔ 認証エラー：このBotを使用する権限がありません")
+            return
+
+        try:
+            if len(context.args) != 2:
+                await self._send_reply(update, """❌ 使い方: /set_alloc <種類> <値>
+
+種類:
+• crypto - コイン投資比率
+• trend - トレンド戦略比率
+• coint - 共和分戦略比率
+
+例: /set_alloc crypto 0.6""")
+                return
+
+            alloc_type = context.args[0].lower()
+            new_value = float(context.args[1])
+
+            if new_value < 0.0 or new_value > 1.0:
+                await self._send_reply(update, "❌ 値は0.0～1.0の範囲で指定してください")
+                return
+
+            type_map = {
+                'crypto': 'crypto_ratio',
+                'trend': 'trend_ratio',
+                'coint': 'cointegration_ratio',
+                'cointegration': 'cointegration_ratio'
+            }
+
+            if alloc_type not in type_map:
+                await self._send_reply(update, "❌ 種類は crypto, trend, coint のいずれかを指定してください")
+                return
+
+            config_key = type_map[alloc_type]
+
+            # 設定ファイル更新
+            config_path = Path("config/config.yaml")
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+
+            if 'strategy_allocation' not in config:
+                config['strategy_allocation'] = {}
+
+            old_value = config['strategy_allocation'].get(config_key, 0.5)
+            config['strategy_allocation'][config_key] = new_value
+
+            # バックアップ作成
+            backup_path = config_path.parent / f"config.yaml.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            with open(backup_path, 'w', encoding='utf-8') as f:
+                yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
+
+            # 保存
+            with open(config_path, 'w', encoding='utf-8') as f:
+                yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
+
+            type_names = {
+                'crypto': 'コイン投資比率',
+                'trend': 'トレンド戦略比率',
+                'coint': '共和分戦略比率'
+            }
+
+            message = f"""
+✅ <b>配分変更完了</b>
+
+{type_names[alloc_type]}:
+{old_value:.0%} → <b>{new_value:.0%}</b>
+
+次回取引から適用されます。
+/allocation で確認できます
+"""
+            await self._send_reply(update, message.strip())
+            logger.info(f"配分変更: {alloc_type} {old_value} → {new_value} (Chat ID: {update.effective_chat.id})")
+
+        except ValueError:
+            await self._send_reply(update, "❌ 数値を正しく入力してください（例: 0.5）")
+        except Exception as e:
+            logger.error(f"set_allocationコマンドエラー: {e}")
+            await self._send_reply(update, f"⚠️ エラー: {str(e)}")
+
     async def cmd_commands(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """コマンド一覧（簡潔版）"""
         if not self._check_authorization(update):
@@ -339,9 +729,13 @@ class TelegramBotHandler:
 /status - 状態確認
 /positions - ポジション
 /config - 設定表示
+/allocation - 戦略配分確認
 /pause - 一時停止
 /resume - 再開
+/close_all - 全ポジション売却
+/rebalance - 配分に合わせてリバランス
 /set_stop_loss <値> - 損切変更
+/set_alloc <種類> <値> - 配分変更
 /commands - この一覧
 /help - 詳細ヘルプ
 
@@ -402,9 +796,13 @@ class TelegramBotHandler:
                     BotCommand("status", "システム状態確認"),
                     BotCommand("positions", "保有ポジション一覧"),
                     BotCommand("config", "現在の設定表示"),
+                    BotCommand("allocation", "戦略配分確認"),
                     BotCommand("pause", "取引一時停止"),
                     BotCommand("resume", "取引再開"),
+                    BotCommand("close_all", "全ポジション売却"),
+                    BotCommand("rebalance", "配分に合わせてリバランス"),
                     BotCommand("set_stop_loss", "損切ライン変更"),
+                    BotCommand("set_alloc", "戦略配分変更"),
                     BotCommand("commands", "コマンド一覧"),
                     BotCommand("help", "詳細ヘルプ"),
                 ]
@@ -425,7 +823,11 @@ class TelegramBotHandler:
                 self.application.add_handler(CommandHandler("resume", self.cmd_resume))
                 self.application.add_handler(CommandHandler("positions", self.cmd_positions))
                 self.application.add_handler(CommandHandler("config", self.cmd_config))
+                self.application.add_handler(CommandHandler("allocation", self.cmd_allocation))
+                self.application.add_handler(CommandHandler("close_all", self.cmd_close_all))
+                self.application.add_handler(CommandHandler("rebalance", self.cmd_rebalance))
                 self.application.add_handler(CommandHandler("set_stop_loss", self.cmd_set_stop_loss))
+                self.application.add_handler(CommandHandler("set_alloc", self.cmd_set_allocation))
                 self.application.add_handler(CommandHandler("commands", self.cmd_commands))
                 self.application.add_handler(CommandHandler("help", self.cmd_help))
                 self.application.add_handler(CommandHandler("start", self.cmd_commands))
