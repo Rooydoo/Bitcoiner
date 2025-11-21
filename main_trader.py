@@ -30,7 +30,7 @@ from ml.models.ensemble_model import EnsembleModel
 from trading.order_executor import OrderExecutor
 from trading.position_manager import PositionManager
 from trading.risk_manager import RiskManager
-from trading.strategy.pair_trading_strategy import PairTradingStrategy, PairTradingConfig
+from trading.strategy.pair_trading_strategy import PairTradingStrategy, PairTradingConfig, PairPosition
 
 # Phase 4: Reporting & Notification
 from notification.telegram_notifier import TelegramNotifier
@@ -133,6 +133,9 @@ class CryptoTrader:
         )
         self.pair_trading_strategy = PairTradingStrategy(config=pair_trading_config)
 
+        # DBからオープン中のペアポジションを復元
+        self._restore_pair_positions()
+
         # 戦略配分設定
         self.strategy_allocation = self.config.get('strategy_allocation', {
             'crypto_ratio': 0.5,
@@ -193,6 +196,50 @@ class CryptoTrader:
                 all_exist = False
 
         return all_exist
+
+    def _restore_pair_positions(self):
+        """DBからオープン中のペアポジションを復元"""
+        try:
+            open_positions = self.db_manager.get_open_pair_positions()
+
+            if not open_positions:
+                logger.info("  復元するペアポジションはありません")
+                return
+
+            restored_count = 0
+            for pos_data in open_positions:
+                try:
+                    position = PairPosition(
+                        pair_id=pos_data['pair_id'],
+                        symbol1=pos_data['symbol1'],
+                        symbol2=pos_data['symbol2'],
+                        direction=pos_data['direction'],
+                        hedge_ratio=pos_data['hedge_ratio'],
+                        entry_spread=pos_data['entry_spread'],
+                        entry_z_score=pos_data['entry_z_score'],
+                        entry_time=datetime.fromtimestamp(pos_data['entry_time']),
+                        size1=pos_data['size1'],
+                        size2=pos_data['size2'],
+                        entry_price1=pos_data['entry_price1'],
+                        entry_price2=pos_data['entry_price2'],
+                        unrealized_pnl=pos_data.get('unrealized_pnl', 0.0),
+                        max_pnl=pos_data.get('max_pnl', 0.0),
+                        entry_capital=pos_data['entry_capital']
+                    )
+
+                    self.pair_trading_strategy.positions[position.pair_id] = position
+                    restored_count += 1
+
+                    logger.info(f"  ✓ ペアポジション復元: {position.pair_id}")
+
+                except Exception as e:
+                    logger.error(f"  ✗ ポジション復元エラー: {pos_data.get('pair_id', 'unknown')} - {e}")
+
+            if restored_count > 0:
+                logger.info(f"  ✓ {restored_count}件のペアポジションを復元しました")
+
+        except Exception as e:
+            logger.error(f"ペアポジション復元エラー: {e}")
 
     def _train_initial_models(self):
         """初回起動時のモデル学習"""
