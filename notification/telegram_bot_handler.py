@@ -416,6 +416,142 @@ class TelegramBotHandler:
             logger.error(f"close_allコマンドエラー: {e}")
             await self._send_reply(update, f"⚠️ エラー: {str(e)}")
 
+    async def cmd_rebalance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """リバランスコマンド（配分に合わせて超過分を売却）"""
+        if not self._check_authorization(update):
+            await self._send_reply(update, "⛔ 認証エラー：このBotを使用する権限がありません")
+            return
+
+        try:
+            if not self.trader:
+                await self._send_reply(update, "⚠️ トレーダーインスタンスが未設定です")
+                return
+
+            # 設定読み込み
+            config_path = Path("config/config.yaml")
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+
+            alloc = config.get('strategy_allocation', {})
+            trading = config.get('trading', {})
+            initial_capital = trading.get('initial_capital', 200000)
+            crypto_ratio = alloc.get('crypto_ratio', 0.5)
+
+            target_crypto = initial_capital * crypto_ratio
+
+            # 現在のポジション価値を計算
+            positions = self.trader.position_manager.get_all_positions()
+            current_crypto = 0.0
+
+            for pos in positions:
+                try:
+                    current_price = self.trader.order_executor.get_current_price(pos.symbol)
+                    current_crypto += pos.quantity * current_price
+                except:
+                    pass
+
+            excess = current_crypto - target_crypto
+
+            # 確認メッセージ（引数なしの場合）
+            if not context.args or context.args[0].lower() != 'confirm':
+                if excess <= 0:
+                    message = f"""
+✅ <b>リバランス不要</b>
+
+目標: ¥{target_crypto:,.0f}
+現在: ¥{current_crypto:,.0f}
+
+超過分はありません。
+"""
+                else:
+                    message = f"""
+⚖️ <b>リバランス確認</b>
+
+目標配分: ¥{target_crypto:,.0f} ({crypto_ratio:.0%})
+現在保有: ¥{current_crypto:,.0f}
+超過分: <b>¥{excess:,.0f}</b>
+
+超過分を売却してリバランスします。
+
+<b>実行するには:</b>
+/rebalance confirm
+"""
+                await self._send_reply(update, message.strip())
+                return
+
+            if excess <= 0:
+                await self._send_reply(update, "✅ リバランス不要です（超過分なし）")
+                return
+
+            # リバランス実行（超過分を売却）
+            sold_amount = 0.0
+            errors = []
+
+            # ポジションを価値順にソート（大きいものから売却）
+            pos_with_value = []
+            for pos in positions:
+                try:
+                    current_price = self.trader.order_executor.get_current_price(pos.symbol)
+                    value = pos.quantity * current_price
+                    pos_with_value.append((pos, current_price, value))
+                except Exception as e:
+                    errors.append(f"{pos.symbol}: 価格取得失敗")
+
+            pos_with_value.sort(key=lambda x: x[2], reverse=True)
+
+            remaining_excess = excess
+            for pos, current_price, value in pos_with_value:
+                if remaining_excess <= 0:
+                    break
+
+                # 売却数量を計算
+                sell_value = min(remaining_excess, value)
+                sell_qty = sell_value / current_price
+
+                try:
+                    if pos.side == 'long':
+                        order = self.trader.order_executor.create_market_sell(
+                            pos.symbol, sell_qty
+                        )
+                    else:
+                        order = self.trader.order_executor.create_market_buy(
+                            pos.symbol, sell_qty
+                        )
+
+                    if order:
+                        sold_amount += sell_value
+                        remaining_excess -= sell_value
+
+                        # ポジション更新
+                        if sell_qty >= pos.quantity:
+                            self.trader.position_manager.close_position(pos.symbol)
+                        else:
+                            pos.quantity -= sell_qty
+
+                        logger.info(f"リバランス売却: {pos.symbol} ¥{sell_value:,.0f}")
+                except Exception as e:
+                    errors.append(f"{pos.symbol}: {str(e)}")
+
+            message = f"""
+⚖️ <b>リバランス完了</b>
+
+売却額: <b>¥{sold_amount:,.0f}</b>
+目標との差: ¥{remaining_excess:,.0f}
+
+/allocation で確認できます
+"""
+            if errors:
+                message += f"\n⚠️ エラー: {len(errors)}件\n"
+                for err in errors[:3]:
+                    message += f"• {err}\n"
+
+            await self._send_reply(update, message.strip())
+            logger.info(f"リバランス実行: ¥{sold_amount:,.0f} (Chat ID: {update.effective_chat.id})")
+
+        except Exception as e:
+            logger.error(f"rebalanceコマンドエラー: {e}")
+            await self._send_reply(update, f"⚠️ エラー: {str(e)}")
+
     async def cmd_allocation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """戦略配分確認コマンド"""
         if not self._check_authorization(update):
@@ -567,6 +703,7 @@ class TelegramBotHandler:
 /pause - 一時停止
 /resume - 再開
 /close_all - 全ポジション売却
+/rebalance - 配分に合わせてリバランス
 /set_stop_loss <値> - 損切変更
 /set_alloc <種類> <値> - 配分変更
 /commands - この一覧
@@ -633,6 +770,7 @@ class TelegramBotHandler:
                     BotCommand("pause", "取引一時停止"),
                     BotCommand("resume", "取引再開"),
                     BotCommand("close_all", "全ポジション売却"),
+                    BotCommand("rebalance", "配分に合わせてリバランス"),
                     BotCommand("set_stop_loss", "損切ライン変更"),
                     BotCommand("set_alloc", "戦略配分変更"),
                     BotCommand("commands", "コマンド一覧"),
@@ -657,6 +795,7 @@ class TelegramBotHandler:
                 self.application.add_handler(CommandHandler("config", self.cmd_config))
                 self.application.add_handler(CommandHandler("allocation", self.cmd_allocation))
                 self.application.add_handler(CommandHandler("close_all", self.cmd_close_all))
+                self.application.add_handler(CommandHandler("rebalance", self.cmd_rebalance))
                 self.application.add_handler(CommandHandler("set_stop_loss", self.cmd_set_stop_loss))
                 self.application.add_handler(CommandHandler("set_alloc", self.cmd_set_allocation))
                 self.application.add_handler(CommandHandler("commands", self.cmd_commands))
