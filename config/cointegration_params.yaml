@@ -1,0 +1,58 @@
+# 共和分ペアトレーディング設定
+# Cointegration Pair Trading Parameters
+
+# 対象通貨ペア
+symbols:
+  - BTC/JPY
+  - ETH/JPY
+  - XRP/JPY
+  - LTC/JPY
+
+# 共和分検定パラメータ
+cointegration:
+  # 有意水準（5%）
+  significance_level: 0.05
+  # ルックバック期間（日数）
+  lookback_period: 252
+  # 最小半減期（日）- これより短いペアは除外
+  min_half_life: 5.0
+  # 最大半減期（日）- これより長いペアは除外
+  max_half_life: 60.0
+  # リバランス間隔（時間）
+  rebalance_interval: 24
+
+# シグナルパラメータ
+signal:
+  # エントリーZスコア閾値
+  z_score_entry: 2.0
+  # エグジットZスコア閾値（平均回帰）
+  z_score_exit: 0.5
+  # ストップロスZスコア閾値
+  z_score_stop_loss: 4.0
+
+# ポジション管理
+position:
+  # 1ペアあたりの資金割合
+  position_size_pct: 0.10
+  # 最大同時ペア数
+  max_pairs: 3
+  # 最小注文サイズ（JPY）
+  min_order_size: 1000
+
+# リスク管理
+risk:
+  # 最大ドローダウン（%）
+  max_drawdown_pct: 0.15
+  # 日次損失上限（%）
+  daily_loss_limit_pct: 0.05
+  # ペアごとの損失上限（%）
+  pair_loss_limit_pct: 0.03
+
+# バックテスト設定
+backtest:
+  # 取引手数料（%）
+  fee_rate: 0.0015
+  # スリッページ（%）
+  slippage: 0.001
+  # 初期資金（JPY）
+  initial_capital: 1000000
