@@ -1,0 +1,28 @@
+[Unit]
+Description=CryptoTrader - 暗号資産自動売買システム
+After=network.target
+
+[Service]
+Type=simple
+User=your_username
+WorkingDirectory=/path/to/Bitcoiner
+ExecStart=/path/to/Bitcoiner/venv/bin/python /path/to/Bitcoiner/main_trader.py --interval 5
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/path/to/Bitcoiner/logs/systemd.log
+StandardError=append:/path/to/Bitcoiner/logs/systemd_error.log
+
+# 環境変数
+Environment="PATH=/path/to/Bitcoiner/venv/bin"
+EnvironmentFile=/path/to/Bitcoiner/.env
+
+# リソース制限
+MemoryLimit=1G
+CPUQuota=50%
+
+# セキュリティ設定
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

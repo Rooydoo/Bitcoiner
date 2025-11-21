@@ -2,27 +2,28 @@
 
 # 取引所設定
 exchange:
-  name: binance
-  use_testnet: false  # 本番運用時はfalse
-  
-# 取引対象通貨
+  name: bitflyer
+
+# 取引対象通貨（円建て）
 trading_pairs:
-  - symbol: BTC/USDT
+  - symbol: BTC/JPY
     allocation: 0.6  # 60%
-  - symbol: ETH/USDT
+  - symbol: ETH/JPY
     allocation: 0.4  # 40%
 
 # リスク管理パラメータ
 risk_management:
-  max_position_size_pct: 2.0  # 総資産の2%
-  stop_loss_pct: 5.0           # 5%損失で強制決済
-  take_profit_first: 15.0      # 第1段階利益確定 15%
-  take_profit_second: 25.0     # 第2段階利益確定 25%
-  max_daily_loss_pct: 5.0      # 日次最大損失
-  max_weekly_loss_pct: 10.0    # 週次最大損失
-  max_monthly_loss_pct: 15.0   # 月次最大損失
-  max_positions: 2             # 最大同時保有数
-  consecutive_loss_limit: 5    # 連続損失制限
+  max_position_size: 0.60       # ポジションサイズ上限（資産の60%）
+  stop_loss_pct: 10.0           # ストップロス（10%損失で強制決済）
+  max_drawdown_pct: 20.0        # 最大ドローダウン（20%）
+  profit_taking_enabled: true   # 段階的利益確定を有効化
+  take_profit_first: 15.0       # 第1段階利益確定 +15%で50%決済
+  take_profit_second: 25.0      # 第2段階利益確定 +25%で全決済
+  max_daily_loss_pct: 5.0       # 日次最大損失
+  max_weekly_loss_pct: 10.0     # 週次最大損失
+  max_monthly_loss_pct: 15.0    # 月次最大損失
+  max_positions: 1              # 最大同時保有数（相関リスク低減のため1に変更）
+  consecutive_loss_limit: 5     # 連続損失制限
 
 # ML設定
 machine_learning:
@@ -38,7 +39,29 @@ reporting:
   morning_report_time: "07:00"
   noon_report_time: "13:00"
   evening_report_time: "22:00"
+  weekly_report_day: 0        # 週次レポート曜日（0=月曜, 6=日曜）
+  weekly_report_time: "22:00"  # 週次レポート時刻
+  monthly_report_day: -1       # 月次レポート日（-1=月末）
+  monthly_report_time: "22:00" # 月次レポート時刻
+
+# 戦略アドバイザー設定
+strategy_advisor:
+  use_llm: true                         # LLM（Claude Sonnet）を使用
+  model: "claude-sonnet-4-5-20250929"   # 使用モデル
+  fallback_to_rule_based: true          # LLM失敗時にルールベースにフォールバック
   
+# 取引設定
+trading:
+  initial_capital: 200000      # 初期資本（円）
+  min_confidence: 0.6          # 最小シグナル信頼度（60%以上でエントリー）
+  trading_interval_minutes: 5  # 取引サイクル間隔（分）
+
+# Telegram通知設定（.envで設定推奨）
+telegram:
+  enabled: true                # 通知有効化（APIキー設定時にtrue）
+  bot_token: null              # Bot Token（.env推奨）
+  chat_id: null                # Chat ID（.env推奨）
+
 # Streamlit UI設定
 ui:
   port: 8501

@@ -1,13 +1,21 @@
-"""Binance API接続モジュール"""
+"""bitFlyer API接続モジュール"""
 
 import ccxt
 import logging
 import time
 import os
+import sys
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 import pandas as pd
 from dotenv import load_dotenv
+
+# プロジェクトルートをパスに追加
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+# リトライ機能インポート
+from utils.retry import retry_on_network_error
 
 # 環境変数読み込み
 load_dotenv()
@@ -15,70 +23,121 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-class BinanceDataCollector:
-    """Binance取引所のデータ取得クラス"""
+class BitflyerDataCollector:
+    """bitFlyer取引所のデータ取得クラス"""
 
-    def __init__(self, api_key: Optional[str] = None, api_secret: Optional[str] = None, testnet: bool = False):
+    def __init__(self, api_key: Optional[str] = None, api_secret: Optional[str] = None):
         """
         初期化
 
         Args:
-            api_key: BinanceAPIキー（Noneの場合は環境変数から読み込み）
-            api_secret: Binanceシークレット（Noneの場合は環境変数から読み込み）
-            testnet: テストネット使用フラグ
+            api_key: bitFlyer APIキー（Noneの場合は環境変数から読み込み）
+            api_secret: bitFlyerシークレット（Noneの場合は環境変数から読み込み）
         """
         # API認証情報
-        self.api_key = api_key or os.getenv('BINANCE_API_KEY')
-        self.api_secret = api_secret or os.getenv('BINANCE_API_SECRET')
+        self.api_key = api_key or os.getenv('BITFLYER_API_KEY')
+        self.api_secret = api_secret or os.getenv('BITFLYER_API_SECRET')
 
-        # Binance取引所初期化
+        # bitFlyer取引所初期化
         config = {
             'enableRateLimit': True,  # レート制限を自動管理
-            'rateLimit': 1200,  # 1.2秒間隔
+            'rateLimit': 500,  # 0.5秒間隔（bitFlyerは制限が厳しい）
         }
 
         if self.api_key and self.api_secret:
             config['apiKey'] = self.api_key
             config['secret'] = self.api_secret
 
-        if testnet:
-            config['urls'] = {
-                'api': 'https://testnet.binance.vision/api',
-            }
+        self.exchange = ccxt.bitflyer(config)
+        logger.info("bitFlyer接続初期化完了")
 
-        self.exchange = ccxt.binance(config)
-        logger.info(f"Binance接続初期化完了 (testnet={testnet})")
+    @retry_on_network_error(max_retries=4, base_delay=2.0)
+    def _fetch_trades_with_retry(self, symbol: str, since: Optional[int] = None, limit: int = 1000):
+        """約定データ取得（リトライ付き）"""
+        return self.exchange.fetch_trades(symbol, since=since, limit=limit)
 
     def fetch_ohlcv(
         self,
         symbol: str,
         timeframe: str = '1m',
         since: Optional[int] = None,
-        limit: int = 1000
+        limit: int = 500  # bitFlyerは500が上限
     ) -> pd.DataFrame:
         """
         ローソク足データを取得
 
+        注意: bitFlyerはfetchOHLCV()未サポートのため、fetch_trades()からOHLCVを構築
+
         Args:
-            symbol: 通貨ペア（例: 'BTC/USDT'）
+            symbol: 通貨ペア（例: 'BTC/JPY'）
             timeframe: 時間足（'1m', '5m', '1h', '1d'など）
             since: 開始時刻（Unixタイムスタンプ、ミリ秒）
-            limit: 取得件数（最大1000）
+            limit: 取得件数（最大500）
 
         Returns:
             OHLCVデータフレーム
         """
         try:
-            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+            # bitFlyerのlimit制限
+            if limit > 500:
+                logger.warning(f"bitFlyerのlimit上限は500です。{limit}を500に調整します")
+                limit = 500
 
-            if not ohlcv:
-                logger.warning(f"データなし: {symbol} {timeframe}")
+            # bitFlyerはfetchOHLCV未サポート -> fetch_trades()からOHLCVを構築
+            logger.info(f"fetch_trades()から{timeframe}のOHLCVを構築します")
+
+            # 約定履歴を取得（リトライ付き）
+            trades = self._fetch_trades_with_retry(symbol, since=since, limit=1000)
+
+            if not trades:
+                logger.warning(f"約定データなし: {symbol}")
                 return pd.DataFrame()
 
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            # 約定データをDataFrameに変換
+            trades_df = pd.DataFrame([
+                {
+                    'timestamp': t['timestamp'],
+                    'price': t['price'],
+                    'amount': t['amount']
+                }
+                for t in trades
+            ])
 
-            # タイムスタンプをUnix秒に変換（DBと整合性を保つ）
-            df['timestamp'] = (df['timestamp'] / 1000).astype(int)
+            # タイムスタンプを秒単位に変換
+            trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'], unit='ms')
+
+            # タイムフレームに応じてリサンプリング
+            timeframe_map = {
+                '1m': '1T',
+                '5m': '5T',
+                '15m': '15T',
+                '1h': '1H',
+                '4h': '4H',
+                '1d': '1D'
+            }
+
+            resample_freq = timeframe_map.get(timeframe, '1T')
+
+            # OHLCVを構築
+            trades_df.set_index('timestamp', inplace=True)
+            ohlcv_df = trades_df['price'].resample(resample_freq).ohlc()
+            ohlcv_df['volume'] = trades_df['amount'].resample(resample_freq).sum()
+
+            # NaNを前方埋め
+            ohlcv_df = ohlcv_df.ffill().dropna()
+
+            # インデックスをリセット
+            ohlcv_df.reset_index(inplace=True)
+
+            # limit件数に調整
+            if len(ohlcv_df) > limit:
+                ohlcv_df = ohlcv_df.tail(limit)
+
+            # カラム順を整理
+            df = ohlcv_df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].copy()
+
+            # タイムスタンプをdatetimeオブジェクトからUnix秒に変換
+            df['timestamp'] = df['timestamp'].astype(int) // 10**9
 
             logger.debug(f"OHLCV取得: {symbol} {timeframe} ({len(df)}件)")
             return df
@@ -99,7 +158,7 @@ class BinanceDataCollector:
         timeframe: str,
         start_date: datetime,
         end_date: Optional[datetime] = None,
-        batch_size: int = 1000
+        batch_size: int = 500
     ) -> pd.DataFrame:
         """
         過去データを大量取得（複数回のAPIコール）
@@ -109,7 +168,7 @@ class BinanceDataCollector:
             timeframe: 時間足
             start_date: 開始日時
             end_date: 終了日時（Noneの場合は現在時刻）
-            batch_size: 1回あたりの取得件数
+            batch_size: 1回あたりの取得件数（bitFlyerは最大500）
 
         Returns:
             統合されたOHLCVデータフレーム
@@ -117,10 +176,11 @@ class BinanceDataCollector:
         if end_date is None:
             end_date = datetime.now()
 
-        logger.info(f"大量データ取得開始: {symbol} {timeframe} ({start_date} ~ {end_date})")
+        # bitFlyerの制限
+        if batch_size > 500:
+            batch_size = 500
 
-        # タイムフレームをミリ秒に変換
-        timeframe_ms = self._timeframe_to_ms(timeframe)
+        logger.info(f"大量データ取得開始: {symbol} {timeframe} ({start_date} ~ {end_date})")
 
         all_data = []
         current_time = int(start_date.timestamp() * 1000)  # ミリ秒
@@ -148,8 +208,8 @@ class BinanceDataCollector:
                     progress_date = datetime.fromtimestamp(last_timestamp)
                     logger.info(f"進捗: {batch_count}バッチ目、最新: {progress_date}")
 
-                # レート制限対策（念のため）
-                time.sleep(0.1)
+                # レート制限対策（bitFlyerは厳しいので長めに待機）
+                time.sleep(0.5)
 
             except Exception as e:
                 logger.error(f"バッチ{batch_count}でエラー: {e}")
@@ -234,31 +294,6 @@ class BinanceDataCollector:
             logger.error(f"残高取得エラー: {e}")
             raise
 
-    def _timeframe_to_ms(self, timeframe: str) -> int:
-        """
-        タイムフレームをミリ秒に変換
-
-        Args:
-            timeframe: タイムフレーム文字列（例: '1m', '1h', '1d'）
-
-        Returns:
-            ミリ秒
-        """
-        units = {
-            'm': 60 * 1000,
-            'h': 60 * 60 * 1000,
-            'd': 24 * 60 * 60 * 1000,
-            'w': 7 * 24 * 60 * 60 * 1000,
-        }
-
-        amount = int(timeframe[:-1])
-        unit = timeframe[-1]
-
-        if unit not in units:
-            raise ValueError(f"不正なタイムフレーム: {timeframe}")
-
-        return amount * units[unit]
-
     def test_connection(self) -> bool:
         """
         接続テスト
@@ -267,23 +302,21 @@ class BinanceDataCollector:
             成功した場合True
         """
         try:
-            self.exchange.fetch_status()
-            logger.info("Binance接続テスト成功")
+            # bitFlyerはfetch_statusをサポートしていないので、tickerで代用
+            self.fetch_ticker('BTC/JPY')
+            logger.info("bitFlyer接続テスト成功")
             return True
         except Exception as e:
-            logger.error(f"Binance接続テスト失敗: {e}")
+            logger.error(f"bitFlyer接続テスト失敗: {e}")
             return False
 
 
 # インスタンス生成用ヘルパー
-def create_binance_collector(testnet: bool = False) -> BinanceDataCollector:
+def create_bitflyer_collector() -> BitflyerDataCollector:
     """
-    Binanceデータコレクターを作成
-
-    Args:
-        testnet: テストネット使用フラグ
+    bitFlyerデータコレクターを作成
 
     Returns:
-        BinanceDataCollectorインスタンス
+        BitflyerDataCollectorインスタンス
     """
-    return BinanceDataCollector(testnet=testnet)
+    return BitflyerDataCollector()
