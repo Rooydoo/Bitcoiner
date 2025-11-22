@@ -32,6 +32,10 @@ class SQLiteManager:
         # HIGH-8: 接続キャッシュ（接続プーリング）
         self._connection_cache = {}
 
+        # BLOCKER-2: 接続キャッシュへのスレッドセーフアクセス
+        import threading
+        self._cache_lock = threading.Lock()
+
         # 初期化
         self._initialize_databases()
 
@@ -97,29 +101,31 @@ class SQLiteManager:
         Returns:
             WALモード有効化されたsqlite3.Connection
         """
-        # HIGH-8: キャッシュから接続を取得（なければ新規作成）
+        # BLOCKER-2: スレッドセーフな接続キャッシュアクセス
         db_key = str(db_path)
 
-        if db_key in self._connection_cache:
-            conn = self._connection_cache[db_key]
-            try:
-                # 接続が有効か確認
-                conn.execute("SELECT 1")
-                return conn
-            except sqlite3.Error:
-                # 無効な接続は削除して再作成
-                del self._connection_cache[db_key]
+        with self._cache_lock:
+            # キャッシュから接続を取得（なければ新規作成）
+            if db_key in self._connection_cache:
+                conn = self._connection_cache[db_key]
+                try:
+                    # 接続が有効か確認
+                    conn.execute("SELECT 1")
+                    return conn
+                except sqlite3.Error:
+                    # 無効な接続は削除して再作成
+                    del self._connection_cache[db_key]
 
-        # 新しい接続を作成してキャッシュに保存
-        conn = sqlite3.connect(db_path, check_same_thread=False)  # マルチスレッド対応
+            # 新しい接続を作成してキャッシュに保存
+            conn = sqlite3.connect(db_path, check_same_thread=False)  # マルチスレッド対応
 
-        # BLOCKER-3: 最大限の安全性を確保するデータベース設定
-        self._configure_database_safety(conn)
+            # BLOCKER-3: 最大限の安全性を確保するデータベース設定
+            self._configure_database_safety(conn)
 
-        self._connection_cache[db_key] = conn
-        logger.debug(f"新規接続をキャッシュ: {Path(db_path).name}")
+            self._connection_cache[db_key] = conn
+            logger.debug(f"新規接続をキャッシュ: {Path(db_path).name}")
 
-        return conn
+            return conn
 
     def _init_price_db(self):
         """価格データベースの初期化"""
@@ -1089,16 +1095,18 @@ class SQLiteManager:
 
     def close_all_connections(self):
         """HIGH-8: キャッシュされた全接続をクローズ"""
-        for db_key, conn in list(self._connection_cache.items()):
-            try:
-                conn.commit()  # 未コミットの変更を保存
-                conn.close()
-                logger.debug(f"接続クローズ: {Path(db_key).name}")
-            except Exception as e:
-                logger.error(f"接続クローズ失敗: {Path(db_key).name} - {e}")
+        # BLOCKER-2: スレッドセーフに接続をクローズ
+        with self._cache_lock:
+            for db_key, conn in list(self._connection_cache.items()):
+                try:
+                    conn.commit()  # 未コミットの変更を保存
+                    conn.close()
+                    logger.debug(f"接続クローズ: {Path(db_key).name}")
+                except Exception as e:
+                    logger.error(f"接続クローズ失敗: {Path(db_key).name} - {e}")
 
-        self._connection_cache.clear()
-        logger.info("全データベース接続をクローズしました")
+            self._connection_cache.clear()
+            logger.info("全データベース接続をクローズしました")
 
     def __del__(self):
         """デストラクタ: オブジェクト破棄時に接続をクリーンアップ"""
@@ -1212,16 +1220,10 @@ class SQLiteManager:
         # 将来的に永続的接続を使う場合のために実装を用意
 
     def close(self):
-        """close_all()のエイリアス"""
-        self.close_all()
+        """close_all_connections()のエイリアス"""
+        self.close_all_connections()
 
-    def __del__(self):
-        """デストラクタでクリーンアップ"""
-        try:
-            self.close_all()
-        except Exception:
-            # デストラクタでの例外は無視
-            pass
+    # MEDIUM-1: 重複していた2つ目の__del__を削除（1つ目のみ使用）
 
 
 # シングルトンインスタンス

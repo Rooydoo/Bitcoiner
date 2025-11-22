@@ -84,7 +84,9 @@ class Position:
         pnl = self.calculate_unrealized_pnl(current_price)
         invested_capital = self.entry_price * self.quantity
 
-        return (pnl / invested_capital) * 100 if invested_capital > 0 else 0.0
+        # HIGH-2: ゼロ除算防止のためepsilon使用
+        epsilon = 1e-10
+        return (pnl / invested_capital) * 100 if invested_capital > epsilon else 0.0
 
     def close(self, exit_price: float, exit_time: Optional[datetime] = None):
         """
@@ -437,11 +439,13 @@ class PositionManager:
             except Exception as db_error:
                 conn.rollback()
                 logger.error(f"  ✗ 部分決済のDB記録失敗: {db_error}")
-                raise
+                # CRITICAL-2: DB失敗時はメモリも更新しない
+                raise  # 例外を伝播してメモリ更新を防ぐ
                 # HIGH-8: db_managerの接続キャッシュを使用 (conn.close()不要)
 
-        # ポジションの数量を更新
+        # CRITICAL-2: DB操作が成功した場合のみポジションの数量を更新
         position.quantity = remaining_quantity
+        logger.debug(f"CRITICAL-2: メモリ上のポジション数量を更新: {remaining_quantity}")
 
         partial_close_info = {
             'symbol': symbol,
@@ -473,44 +477,60 @@ class PositionManager:
         Returns:
             クローズしたPositionインスタンス（存在しない場合はNone）
         """
-        # MEDIUM-1: ポジション辞書の変更を保護
+        # CRITICAL-1: 原子性保証のため、DB保存→メモリ削除の順序で実行
         with self.position_lock:
             if symbol not in self.open_positions:
                 logger.warning(f"{symbol}のオープンポジションが見つかりません")
                 return None
 
-            position = self.open_positions.pop(symbol)
+            # ポジションのコピーを取得（まだメモリから削除しない）
+            position = self.open_positions[symbol]
             position.close(exit_price)
+
+            # CRITICAL-1: DBに先に保存（失敗したらメモリから削除しない）
+            if self.db_manager:
+                try:
+                    # ポジション更新
+                    updates = {
+                        'exit_price': exit_price,
+                        'exit_amount': position.quantity,
+                        'exit_time': int(position.exit_time.timestamp()),
+                        'status': 'closed'
+                    }
+                    self.db_manager.update_position(position.position_id, updates)
+
+                    # トレード履歴にも記録
+                    from datetime import datetime
+                    commission_rate = 0.0015
+                    entry_fee = position.entry_price * position.quantity * commission_rate
+                    exit_fee = exit_price * position.quantity * commission_rate
+                    trade_data = {
+                        'symbol': symbol,
+                        'side': position.side,
+                        'price': exit_price,
+                        'amount': position.quantity,
+                        'cost': exit_price * position.quantity,
+                        'fee': entry_fee + exit_fee,
+                        'order_type': 'market',
+                        'profit_loss': position.realized_pnl,
+                        'timestamp': int(datetime.now().timestamp())
+                    }
+                    self.db_manager.insert_trade(trade_data)
+
+                    logger.debug(f"CRITICAL-1: DB保存成功、メモリから削除します: {symbol}")
+
+                except Exception as db_error:
+                    # DB保存失敗 → メモリから削除しない
+                    logger.error(f"CRITICAL-1: DB保存失敗、ポジションをメモリに保持: {symbol} - {db_error}")
+                    # ポジションを元の状態に戻す
+                    position.exit_price = None
+                    position.exit_time = None
+                    position.realized_pnl = 0
+                    raise  # 呼び出し元にエラーを伝播
+
+            # DB保存成功 → メモリから削除してclosed_positionsに追加
+            self.open_positions.pop(symbol)
             self.closed_positions.append(position)
-
-        # DBに保存
-        if self.db_manager:
-            # ポジション更新
-            updates = {
-                'exit_price': exit_price,
-                'exit_amount': position.quantity,
-                'exit_time': int(position.exit_time.timestamp()),  # Unix timestamp
-                'status': 'closed'
-            }
-            self.db_manager.update_position(position.position_id, updates)
-
-            # トレード履歴にも記録
-            from datetime import datetime
-            commission_rate = 0.0015
-            entry_fee = position.entry_price * position.quantity * commission_rate
-            exit_fee = exit_price * position.quantity * commission_rate
-            trade_data = {
-                'symbol': symbol,
-                'side': position.side,
-                'price': exit_price,
-                'amount': position.quantity,
-                'cost': exit_price * position.quantity,
-                'fee': entry_fee + exit_fee,  # 総手数料（エントリー+決済）
-                'order_type': 'market',
-                'profit_loss': position.realized_pnl,  # フィールド名修正（pnl → profit_loss）
-                'timestamp': int(datetime.now().timestamp())  # Unix timestamp
-            }
-            self.db_manager.insert_trade(trade_data)
 
         return position
 

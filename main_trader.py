@@ -434,7 +434,7 @@ class CryptoTrader:
                 LIMIT 10
             """)
             unknown_positions = cursor.fetchall()
-            conn.close()
+            # HIGH-1: 接続キャッシュ使用のため close() は不要（削除）
 
             if not unknown_positions:
                 return  # unknown状態のポジションがない
@@ -1187,8 +1187,10 @@ class CryptoTrader:
                         if filled_amount < requested_amount * 0.95:  # 95%未満なら部分約定
                             logger.warning(f"  ⚠️  部分約定: {filled_amount:.8f}/{requested_amount:.8f} "
                                          f"({filled_amount/requested_amount*100:.1f}%)")
-                            # 部分約定の数量でポジション確定
+                            # HIGH-4: 部分約定の数量でポジション確定
+                            # この変更は confirm_pending_position() でDBに反映される
                             pending_position.quantity = filled_amount
+                            pending_position.entry_price = actual_price  # 実際の約定価格も更新
 
                         # ポジション確定（完全約定または部分約定の数量で）
                         if self.position_manager.confirm_pending_position(pending_position, actual_price):
@@ -1619,8 +1621,14 @@ class CryptoTrader:
                             )
                             logger.debug(f"      ✓ ペアポジションステータスを'open'に更新")
                         except Exception as update_error:
-                            logger.error(f"      ✗ ステータス更新失敗: {update_error}")
-                            # 更新失敗は警告のみ（ポジションは既にDBにあるため）
+                            logger.error(f"      ✗ HIGH-3: ステータス更新失敗: {update_error}")
+                            # HIGH-3: DB不整合の可能性があるため警告通知
+                            self.notifier.notify_error(
+                                'ペアポジションDB更新失敗',
+                                f'ペア {position.pair_id} のステータス更新に失敗しました。\n'
+                                f'ポジションは作成されていますが、ステータスが不正です。\n'
+                                f'エラー: {update_error}'
+                            )
 
                         # Telegram通知
                         self.notifier.notify_pair_trade_open(
@@ -1645,7 +1653,13 @@ class CryptoTrader:
                             )
                             logger.debug(f"      ✓ ペアポジションステータスを'execution_failed'に更新")
                         except Exception as update_error:
-                            logger.error(f"      ✗ ステータス更新失敗: {update_error}")
+                            logger.error(f"      ✗ HIGH-3: ステータス更新失敗: {update_error}")
+                            # HIGH-3: DB不整合の可能性があるため警告通知
+                            self.notifier.notify_error(
+                                'ペアポジション失敗状態の記録失敗',
+                                f'ペア {position.pair_id} の失敗ステータス更新に失敗しました。\n'
+                                f'エラー: {update_error}'
+                            )
 
                         # メモリからも削除
                         if position.pair_id in self.pair_trading_strategy.positions:
