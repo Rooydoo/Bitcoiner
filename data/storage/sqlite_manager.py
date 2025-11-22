@@ -394,6 +394,10 @@ class SQLiteManager:
 
             logger.info(f"取引記録: {trade_data['symbol']} {trade_data['side']} @ {trade_data['price']}")
             return trade_id
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"取引挿入失敗: {e}")
+            raise
         finally:
             conn.close()
 
@@ -451,7 +455,8 @@ class SQLiteManager:
             ALLOWED_POSITION_COLUMNS = {
                 'entry_price', 'entry_amount',  # 二段階コミット確定時に必要
                 'exit_price', 'exit_amount', 'exit_time', 'status',
-                'profit_loss', 'profit_loss_pct', 'stop_loss', 'take_profit'
+                'profit_loss', 'profit_loss_pct', 'stop_loss', 'take_profit',
+                'hold_time_hours'  # ポジション保有時間
             }
 
             # カラム名を検証
