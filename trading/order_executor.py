@@ -105,6 +105,48 @@ class OrderExecutor:
             logger.error(f"注文数量不足: {symbol} {amount:.8f} < 最小値 {min_amount}")
             return None
 
+        # 最大注文数量チェック（異常に大きな注文を防止）
+        max_amounts = {
+            'BTC/JPY': 10.0,    # 最大10 BTC
+            'ETH/JPY': 100.0,   # 最大100 ETH
+            'XRP/JPY': 100000.0,  # 最大100,000 XRP
+            'FX_BTC_JPY': 10.0
+        }
+        max_amount = max_amounts.get(symbol, 1000.0)
+        if amount > max_amount:
+            logger.error(f"注文数量超過: {symbol} {amount:.8f} > 最大値 {max_amount}")
+            logger.error("  → 異常に大きな注文を検出しました。注文を拒否します。")
+            return None
+
+        # 注文金額の妥当性チェック（推定金額が1億円を超える場合は拒否）
+        if not self.test_mode:
+            try:
+                estimated_price = self.get_current_price(symbol)
+                estimated_cost = amount * estimated_price
+                max_order_cost = 100_000_000  # 1億円
+                if estimated_cost > max_order_cost:
+                    logger.error(f"注文金額超過: {symbol} 推定¥{estimated_cost:,.0f} > 上限¥{max_order_cost:,.0f}")
+                    logger.error(f"  → 数量: {amount:.8f}, 価格: ¥{estimated_price:,.0f}")
+                    return None
+
+                # 買い注文の場合、残高チェック
+                if side == 'buy':
+                    try:
+                        balance = self.get_balance('JPY')
+                        available_jpy = balance.get('free', 0)
+                        commission_rate = 0.0015
+                        required_capital = estimated_cost * (1 + commission_rate)
+
+                        if required_capital > available_jpy:
+                            logger.error(f"残高不足: 必要¥{required_capital:,.0f} > 利用可能¥{available_jpy:,.0f}")
+                            logger.error(f"  → {symbol} {amount:.8f} @ ¥{estimated_price:,.0f}")
+                            return None
+                    except Exception as balance_error:
+                        logger.warning(f"残高チェック失敗: {balance_error}")
+
+            except Exception as e:
+                logger.warning(f"価格取得失敗のため注文金額チェックをスキップ: {e}")
+
         if self.test_mode:
             # テストモード: モック注文を返す
             order = self._create_mock_order(symbol, side, 'market', amount, None)
@@ -296,8 +338,9 @@ class OrderExecutor:
         trade_capital = available_capital * position_ratio
         commission_rate = 0.0015  # bitFlyer手数料
 
-        # 手数料を差し引いた購入可能数量
-        quantity = (trade_capital * (1 - commission_rate)) / current_price
+        # 手数料を考慮した購入可能数量
+        # 正しい計算: quantity * price * (1 + commission) <= capital
+        quantity = trade_capital / (current_price * (1 + commission_rate))
 
         # 精度調整（8桁に丸める）
         quantity = round(quantity, 8)

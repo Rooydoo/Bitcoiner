@@ -39,9 +39,27 @@ class SQLiteManager:
         self._init_ml_models_db()
         logger.info("データベース初期化完了")
 
+    def _connect_with_wal(self, db_path: str):
+        """
+        WALモードでデータベースに接続
+
+        Args:
+            db_path: データベースファイルパス
+
+        Returns:
+            WALモード有効化されたsqlite3.Connection
+        """
+        conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
+
     def _init_price_db(self):
         """価格データベースの初期化"""
         conn = sqlite3.connect(self.price_db)
+        # WALモード有効化（クラッシュ時の安全性向上）
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")  # WALと組み合わせて性能向上
         cursor = conn.cursor()
 
         # OHLCVテーブル
@@ -109,6 +127,9 @@ class SQLiteManager:
     def _init_trades_db(self):
         """取引データベースの初期化"""
         conn = sqlite3.connect(self.trades_db)
+        # WALモード有効化（クラッシュ時の安全性向上）
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
         cursor = conn.cursor()
 
         # 取引履歴テーブル
@@ -222,6 +243,9 @@ class SQLiteManager:
     def _init_ml_models_db(self):
         """MLモデルデータベースの初期化"""
         conn = sqlite3.connect(self.ml_models_db)
+        # WALモード有効化（クラッシュ時の安全性向上）
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
         cursor = conn.cursor()
 
         # モデルメタデータテーブル
