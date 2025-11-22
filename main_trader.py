@@ -96,6 +96,26 @@ class CryptoTrader:
         # Phase 1: データインフラ初期化
         logger.info("\n[Phase 1] データインフラ初期化")
         self.db_manager = SQLiteManager()
+
+        # BLOCKER-2: 起動時に不完全なペアポジションをチェック
+        logger.info("\n[BLOCKER-2 チェック] 不完全なペアポジションを確認中...")
+        incomplete_pairs = self.db_manager.recover_incomplete_pairs()
+        if incomplete_pairs and not test_mode:
+            logger.critical("\n" + "=" * 70)
+            logger.critical("🚨 起動中止: 不完全なペアポジションが存在します")
+            logger.critical("=" * 70)
+            logger.critical("取引所で以下のポジションを手動確認し、")
+            logger.critical("pair_position_states テーブルから該当レコードを削除してください。")
+            logger.critical("=" * 70 + "\n")
+            raise RuntimeError(
+                f"不完全なペアポジションが{len(incomplete_pairs)}件存在します。"
+                "手動で取引所を確認し、調整が必要です。"
+            )
+        elif incomplete_pairs and test_mode:
+            logger.warning(f"⚠️  テストモード: 不完全なペアポジション{len(incomplete_pairs)}件を検出しましたが続行します")
+        else:
+            logger.info("  ✓ 不完全なペアポジションなし")
+
         self.data_collector = BitflyerDataCollector()
         self.indicators = TechnicalIndicators()
         logger.info("  ✓ データベース、API、指標計算モジュール初期化完了")
@@ -403,8 +423,8 @@ class CryptoTrader:
         """✨ execution_unknown状態のポジションを調整（定期実行）"""
         try:
             # execution_unknown状態のポジションを取得
-            import sqlite3
-            conn = sqlite3.connect(self.db_manager.trades_db)
+            # BLOCKER-3: 安全な接続メソッドを使用
+            conn = self.db_manager.get_connection(self.db_manager.trades_db)
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT position_id, symbol, side, entry_amount, entry_price, entry_time

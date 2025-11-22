@@ -341,7 +341,8 @@ class ReportGenerator:
         win_rate = winning_trades / total_trades if total_trades > 0 else 0
 
         # 全ポジション（決済済み）を取得
-        conn = sqlite3.connect(self.db_manager.trades_db)
+        # BLOCKER-3: 安全な接続メソッドを使用
+        conn = self.db_manager.get_connection(self.db_manager.trades_db)
 
         query = "SELECT * FROM positions WHERE status = 'closed'"
         positions_df = pd.read_sql_query(query, conn)
@@ -444,7 +445,8 @@ class ReportGenerator:
             })
 
         # 当日の決済済み取引を取得
-        conn = sqlite3.connect(self.db_manager.trades_db)
+        # BLOCKER-3: 安全な接続メソッドを使用
+        conn = self.db_manager.get_connection(self.db_manager.trades_db)
 
         # 日付の開始・終了タイムスタンプ
         start_ts = int(date.replace(hour=0, minute=0, second=0).timestamp())
@@ -544,7 +546,8 @@ class ReportGenerator:
         total_equity = initial_capital + total_pnl
 
         # 期間内のポジションを取得して平均保有時間を計算
-        conn = sqlite3.connect(self.db_manager.trades_db)
+        # BLOCKER-3: 安全な接続メソッドを使用
+        conn = self.db_manager.get_connection(self.db_manager.trades_db)
 
         start_ts = int(start_date.timestamp())
         end_ts = int(end_date.timestamp())
@@ -655,7 +658,8 @@ class ReportGenerator:
         total_equity = initial_capital + total_pnl
 
         # 期間内のポジションを取得
-        conn = sqlite3.connect(self.db_manager.trades_db)
+        # BLOCKER-3: 安全な接続メソッドを使用
+        conn = self.db_manager.get_connection(self.db_manager.trades_db)
 
         start_ts = int(start_date.timestamp())
         end_ts = int(end_date.timestamp())

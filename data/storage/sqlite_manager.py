@@ -44,6 +44,49 @@ class SQLiteManager:
         self._migrate_add_foreign_keys()
         logger.info("データベース初期化完了")
 
+    def _configure_database_safety(self, conn):
+        """
+        BLOCKER-3: SQLiteの最大限の安全性を確保する設定
+
+        重要: すべての接続に対して実行すること
+
+        Args:
+            conn: sqlite3.Connection
+        """
+        try:
+            # Write-Ahead Logging (ロールバックジャーナルよりも安全)
+            conn.execute("PRAGMA journal_mode=WAL")
+
+            # BLOCKER-3: FULL同期 (すべてのコミットで完全fsync実行)
+            # 注意: 性能は低下するが、クラッシュ時のデータ損失を完全防止
+            conn.execute("PRAGMA synchronous=FULL")
+
+            # 外部キー制約を有効化（孤立レコード防止）
+            conn.execute("PRAGMA foreign_keys=ON")
+
+            # キャッシュサイズを拡大（性能向上のため）
+            conn.execute("PRAGMA cache_size=-64000")  # 64MB
+
+            # セキュアデリート（削除データを上書き）
+            conn.execute("PRAGMA secure_delete=ON")
+
+            conn.commit()
+
+            # 設定が正しく適用されたか検証
+            result = conn.execute("PRAGMA journal_mode").fetchone()
+            if result[0] != 'wal':
+                raise Exception("WALモードの有効化に失敗")
+
+            result = conn.execute("PRAGMA synchronous").fetchone()
+            if result[0] != 2:  # 2 = FULL
+                raise Exception("FULL同期モードの設定に失敗")
+
+            logger.debug("データベース安全設定完了: WAL, FULL sync, FK ON, secure delete ON")
+
+        except Exception as e:
+            logger.error(f"データベース安全設定の失敗: {e}")
+            raise
+
     def _connect_with_wal(self, db_path: str):
         """
         WALモードでデータベースに接続（HIGH-8: 接続キャッシュ使用）
@@ -69,10 +112,9 @@ class SQLiteManager:
 
         # 新しい接続を作成してキャッシュに保存
         conn = sqlite3.connect(db_path, check_same_thread=False)  # マルチスレッド対応
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        # HIGH-6: 外部キー制約を有効化（孤立レコード防止）
-        conn.execute("PRAGMA foreign_keys=ON")
+
+        # BLOCKER-3: 最大限の安全性を確保するデータベース設定
+        self._configure_database_safety(conn)
 
         self._connection_cache[db_key] = conn
         logger.debug(f"新規接続をキャッシュ: {Path(db_path).name}")
@@ -245,11 +287,29 @@ class SQLiteManager:
         )
         """)
 
+        # BLOCKER-2: ペアポジション状態追跡テーブル（原子性保証用）
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS pair_position_states (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair_id TEXT UNIQUE NOT NULL,
+            state TEXT NOT NULL,
+            symbol1 TEXT NOT NULL,
+            symbol2 TEXT NOT NULL,
+            size1 REAL,
+            size2 REAL,
+            order1_id TEXT,
+            order2_id TEXT,
+            created_at INTEGER DEFAULT (strftime('%s', 'now')),
+            updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+        )
+        """)
+
         # インデックス作成
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_time ON trades(symbol, timestamp)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_daily_pnl_date ON daily_pnl(date)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_pair_positions_status ON pair_positions(status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_pair_position_states_state ON pair_position_states(state)")
 
         conn.commit()
         # HIGH-8: 接続はキャッシュされるためclose不要
@@ -526,6 +586,88 @@ class SQLiteManager:
         finally:
             # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
 
+    def create_position_atomic(self, position_data: Dict[str, Any], order_callback) -> str:
+        """
+        BLOCKER-1: 原子性を保証したポジション作成
+
+        1. DBに'pending'状態でポジションを保存
+        2. 注文実行
+        3. 成功なら'open'に更新、失敗なら削除
+
+        Args:
+            position_data: ポジションデータ (position_id, symbol, side, entry_price, entry_amount等)
+            order_callback: 注文を実行する関数 (引数なし、orderオブジェクトを返す)
+
+        Returns:
+            ポジションID
+
+        Raises:
+            Exception: 注文失敗時またはDB操作失敗時
+        """
+        import time
+
+        position_id = position_data.get('position_id')
+        if not position_id:
+            import uuid
+            position_id = str(uuid.uuid4())
+
+        conn = self._connect_with_wal(self.trades_db)
+        cursor = conn.cursor()
+
+        try:
+            # ステップ1: DBに'pending'状態で保存
+            cursor.execute("""
+            INSERT INTO positions (
+                position_id, symbol, side, entry_price, entry_amount, entry_time,
+                stop_loss, take_profit, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+            """, (
+                position_id,
+                position_data['symbol'],
+                position_data['side'],
+                position_data['entry_price'],
+                position_data['entry_amount'],
+                int(time.time()),
+                position_data.get('stop_loss'),
+                position_data.get('take_profit')
+            ))
+            conn.commit()
+            logger.debug(f"BLOCKER-1: ポジション'pending'状態で保存: {position_id}")
+
+            # ステップ2: 取引所で注文実行
+            try:
+                order = order_callback()
+
+                if not order or order.get('status') not in ['closed', 'filled']:
+                    raise Exception(f"注文失敗: {order}")
+
+                logger.info(f"BLOCKER-1: 注文実行成功: {position_id}")
+
+            except Exception as order_error:
+                # 注文失敗 → pendingポジションを削除
+                logger.error(f"BLOCKER-1: 注文失敗、pendingポジションを削除: {order_error}")
+                cursor.execute("DELETE FROM positions WHERE position_id = ?", (position_id,))
+                conn.commit()
+                raise
+
+            # ステップ3: ステータスを'open'に更新
+            cursor.execute("""
+            UPDATE positions
+            SET status = 'open', updated_at = strftime('%s', 'now')
+            WHERE position_id = ?
+            """, (position_id,))
+            conn.commit()
+
+            logger.info(f"BLOCKER-1: ポジション原子的作成完了: {position_id}")
+            return position_id
+
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"BLOCKER-1: ポジション原子的作成失敗: {e}")
+            raise
+        finally:
+            # HIGH-8: 接続キャッシュのためclose不要
+
     def create_position(self, position_data: Dict[str, Any]) -> str:
         """
         新規ポジションを作成
@@ -751,6 +893,58 @@ class SQLiteManager:
 
         # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
         return None
+
+    def recover_incomplete_pairs(self) -> List[Dict[str, Any]]:
+        """
+        BLOCKER-2: 不完全なペアポジションを起動時にチェック
+
+        クラッシュや障害で中断されたペア取引を検出し、手動介入を促す。
+
+        Returns:
+            不完全なペアポジションのリスト
+        """
+        conn = self._connect_with_wal(self.trades_db)
+        cursor = conn.cursor()
+
+        try:
+            # 不完全な状態（pending, first_order_complete, incomplete_needs_manual_fix）を検索
+            cursor.execute("""
+            SELECT * FROM pair_position_states
+            WHERE state IN ('pending', 'first_order_complete', 'incomplete_needs_manual_fix')
+            ORDER BY created_at ASC
+            """)
+
+            rows = cursor.fetchall()
+
+            if rows:
+                columns = [desc[0] for desc in cursor.description]
+                incomplete = [dict(zip(columns, row)) for row in rows]
+
+                logger.critical("=" * 70)
+                logger.critical(f"BLOCKER-2: 不完全なペアポジションを{len(incomplete)}件発見！")
+                logger.critical("=" * 70)
+
+                for pair in incomplete:
+                    logger.critical(f"  ペアID: {pair['pair_id']}")
+                    logger.critical(f"  状態: {pair['state']}")
+                    logger.critical(f"  銘柄: {pair['symbol1']}/{pair['symbol2']}")
+                    logger.critical(f"  Order1 ID: {pair.get('order1_id', 'N/A')}")
+                    logger.critical(f"  Order2 ID: {pair.get('order2_id', 'N/A')}")
+                    logger.critical(f"  作成日時: {pair['created_at']}")
+                    logger.critical("  → 取引所で手動確認が必要です")
+                    logger.critical("-" * 70)
+
+                return incomplete
+            else:
+                logger.info("BLOCKER-2: 不完全なペアポジションなし")
+                return []
+
+        except Exception as e:
+            logger.error(f"BLOCKER-2: ペアポジションリカバリーチェック失敗: {e}")
+            return []
+        finally:
+            # HIGH-8: 接続キャッシュのためclose不要
+            pass
 
     # ========== データ取得メソッド ==========
 
