@@ -52,7 +52,8 @@ from utils.constants import (
     API_FAILURE_THRESHOLD,
     POSITION_RECONCILE_CYCLES,
     WAL_CHECKPOINT_CYCLES,
-    DB_CONNECTION_REFRESH_CYCLES
+    DB_CONNECTION_REFRESH_CYCLES,
+    ORDER_STATUS_RETRY_DELAYS
 )
 
 # ロガー設定
@@ -1120,16 +1121,14 @@ class CryptoTrader:
 
                         import time
 
-                        # ✨ 指数バックオフで最大6回リトライ（合計約63秒）
-                        # 2s, 4s, 8s, 16s, 16s, 16s = 62秒
-                        retry_delays = [2, 4, 8, 16, 16, 16]
+                        # ✨ 指数バックオフで注文状態確認リトライ（定数から読み込み）
                         order_status = None
 
                         # タイムアウト時も一応orderがあるかチェック
                         if order and order.get('id'):
-                            for attempt, delay in enumerate(retry_delays, 1):
+                            for attempt, delay in enumerate(ORDER_STATUS_RETRY_DELAYS, 1):
                                 try:
-                                    logger.info(f"    試行{attempt}/{len(retry_delays)}: {delay}秒待機後に状態確認...")
+                                    logger.info(f"    試行{attempt}/{len(ORDER_STATUS_RETRY_DELAYS)}: {delay}秒待機後に状態確認...")
                                     time.sleep(delay)
 
                                     # 注文状態を取得
@@ -1151,7 +1150,7 @@ class CryptoTrader:
 
                                 except Exception as status_error:
                                     logger.warning(f"    試行{attempt}失敗: {status_error}")
-                                    if attempt == len(retry_delays):
+                                    if attempt == len(ORDER_STATUS_RETRY_DELAYS):
                                         # 全リトライ失敗
                                         logger.error(f"  ✗ 全リトライ失敗 - 状態不明")
                                         self.db_manager.update_position(
