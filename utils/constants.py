@@ -12,6 +12,9 @@ BALANCE_BUFFER_RATE = 0.03  # 残高バッファ: 3%
 PRICE_SLIP_WARNING_THRESHOLD = 0.02  # 価格スリッページ警告: 2%
 PRICE_SLIP_ERROR_THRESHOLD = 0.05  # 価格スリッページエラー: 5%
 
+# LOW-1: 部分約定判定閾値
+PARTIAL_FILL_THRESHOLD = 0.95  # 95%未満なら部分約定とみなす
+
 # ========== タイムアウト設定 ==========
 ORDER_STATUS_RETRY_DELAYS = [2, 4, 8, 16, 16, 16]  # 注文状態確認リトライ (秒)
 ORDER_STATUS_TOTAL_TIMEOUT = sum(ORDER_STATUS_RETRY_DELAYS)  # 合計62秒

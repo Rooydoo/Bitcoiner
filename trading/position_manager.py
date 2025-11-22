@@ -438,7 +438,8 @@ class PositionManager:
 
             except Exception as db_error:
                 conn.rollback()
-                logger.error(f"  ✗ 部分決済のDB記録失敗: {db_error}")
+                # LOW-2: スタックトレース付きでログ
+                logger.error(f"  ✗ CRITICAL-2: 部分決済のDB記録失敗: {db_error}", exc_info=True)
                 # CRITICAL-2: DB失敗時はメモリも更新しない
                 raise  # 例外を伝播してメモリ更新を防ぐ
                 # HIGH-8: db_managerの接続キャッシュを使用 (conn.close()不要)
@@ -521,7 +522,8 @@ class PositionManager:
 
                 except Exception as db_error:
                     # DB保存失敗 → メモリから削除しない
-                    logger.error(f"CRITICAL-1: DB保存失敗、ポジションをメモリに保持: {symbol} - {db_error}")
+                    # LOW-2: スタックトレース付きでログ
+                    logger.error(f"CRITICAL-1: DB保存失敗、ポジションをメモリに保持: {symbol} - {db_error}", exc_info=True)
                     # ポジションを元の状態に戻す
                     position.exit_price = None
                     position.exit_time = None

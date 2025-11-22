@@ -45,6 +45,11 @@ from utils.env_validator import validate_environment
 from utils.config_validator import validate_config
 from utils.health_check import HealthChecker, run_health_check
 from utils.performance_tracker import PerformanceTracker
+from utils.constants import (
+    PRICE_SLIP_WARNING_THRESHOLD,
+    PRICE_SLIP_ERROR_THRESHOLD,
+    PARTIAL_FILL_THRESHOLD
+)
 
 # ロガー設定
 logger = setup_logger('main_trader', 'main_trader.log', console=True)
@@ -1046,15 +1051,16 @@ class CryptoTrader:
                     latest_price = self.order_executor.get_current_price(symbol)
                     price_change_pct = abs(latest_price - current_price) / current_price * 100
 
-                    if price_change_pct > 2.0:  # 2%以上の価格変動
+                    # LOW-1: 定数化したスリッページ閾値を使用
+                    if price_change_pct > PRICE_SLIP_WARNING_THRESHOLD * 100:
                         logger.warning(f"  ⚠️  価格スリッページ検出: {price_change_pct:.2f}% "
                                      f"(¥{current_price:,.0f} → ¥{latest_price:,.0f})")
 
-                        if price_change_pct > 5.0:  # 5%以上なら中止
+                        if price_change_pct > PRICE_SLIP_ERROR_THRESHOLD * 100:
                             logger.error(f"  ✗ スリッページ過大 ({price_change_pct:.2f}%) - 注文中止")
                             return
 
-                        # 2-5%の場合は警告のみ、最新価格で続行
+                        # WARNING～ERROR範囲の場合は警告のみ、最新価格で続行
                         current_price = latest_price
                         logger.info(f"  → 最新価格で続行: ¥{current_price:,.0f}")
 
@@ -1184,7 +1190,8 @@ class CryptoTrader:
                         actual_price = order.get('average') or order.get('price') or current_price
 
                         # 部分約定の警告
-                        if filled_amount < requested_amount * 0.95:  # 95%未満なら部分約定
+                        # LOW-1: 定数化した閾値を使用
+                        if filled_amount < requested_amount * PARTIAL_FILL_THRESHOLD:
                             logger.warning(f"  ⚠️  部分約定: {filled_amount:.8f}/{requested_amount:.8f} "
                                          f"({filled_amount/requested_amount*100:.1f}%)")
                             # HIGH-4: 部分約定の数量でポジション確定
@@ -1557,27 +1564,42 @@ class CryptoTrader:
                             logger.warning(f"         → order2失敗により、order1を反対売買して相殺します")
 
                             try:
-                                # order1の反対売買を実行
+                                # BLOCKER-1: リトライロジック付きロールバック（間に合わせ対応）
                                 rollback_side = 'sell' if position.direction == 'long_spread' else 'buy'
-                                rollback_order = self.order_executor.create_market_order(
-                                    position.symbol1,
-                                    rollback_side,
-                                    position.size1
-                                )
+                                rollback_success = False
+                                max_rollback_retries = 3
 
-                                if rollback_order and rollback_order.get('status') in ['closed', 'filled']:
-                                    logger.warning(f"      ✓ ロールバック成功: {position.symbol1} {rollback_side}")
+                                for retry_attempt in range(max_rollback_retries):
+                                    if retry_attempt > 0:
+                                        import time
+                                        wait_time = 2 ** retry_attempt  # 指数バックオフ: 2s, 4s
+                                        logger.warning(f"      リトライ {retry_attempt}/{max_rollback_retries-1}: {wait_time}秒待機...")
+                                        time.sleep(wait_time)
 
-                                    # ロールバック成功を通知
-                                    self.notifier.notify_error(
-                                        'ペア取引ロールバック',
-                                        f'ペア: {position.pair_id}\n'
-                                        f'Order2失敗のため、Order1をロールバックしました。\n'
-                                        f'{position.symbol1}: {rollback_side} {position.size1:.6f}'
+                                    rollback_order = self.order_executor.create_market_order(
+                                        position.symbol1,
+                                        rollback_side,
+                                        position.size1
                                     )
-                                else:
-                                    # ロールバック失敗 → CRITICAL
-                                    logger.error(f"      ✗✗✗ ロールバック失敗: {position.symbol1}")
+
+                                    if rollback_order and rollback_order.get('status') in ['closed', 'filled']:
+                                        logger.warning(f"      ✓ ロールバック成功（試行{retry_attempt+1}回目）: {position.symbol1} {rollback_side}")
+                                        rollback_success = True
+
+                                        # ロールバック成功を通知
+                                        self.notifier.notify_error(
+                                            'ペア取引ロールバック',
+                                            f'ペア: {position.pair_id}\n'
+                                            f'Order2失敗のため、Order1をロールバックしました（{retry_attempt+1}回目で成功）。\n'
+                                            f'{position.symbol1}: {rollback_side} {position.size1:.6f}'
+                                        )
+                                        break  # 成功したらループ脱出
+                                    else:
+                                        logger.warning(f"      ✗ ロールバック失敗（試行{retry_attempt+1}回目）")
+
+                                if not rollback_success:
+                                    # 全リトライ失敗 → CRITICAL
+                                    logger.error(f"      ✗✗✗ ロールバック全{max_rollback_retries}回失敗: {position.symbol1}")
                                     logger.error(f"         → 未ヘッジポジションが残っています！")
 
                                     # 緊急通知
@@ -1593,7 +1615,8 @@ class CryptoTrader:
                                     self._set_safe_mode(True, "ペア取引ロールバック失敗")
                                     logger.critical("🚨 セーフモード移行: ロールバック失敗のため新規エントリーを停止")
                             except Exception as rollback_error:
-                                logger.error(f"      ✗✗✗ ロールバック処理エラー: {rollback_error}")
+                                # LOW-2: スタックトレース付きでログ
+                                logger.error(f"      ✗✗✗ ロールバック処理エラー: {rollback_error}", exc_info=True)
 
                                 # 緊急通知
                                 self.notifier.notify_error(
@@ -1715,35 +1738,48 @@ class CryptoTrader:
                     logger.warning(f"         → order2決済失敗により、order1を反対売買してヘッジ状態に戻します")
 
                     try:
-                        # order1の反対売買を実行（決済の逆 = 再オープン）
+                        # BLOCKER-1: リトライロジック付きロールバック（クローズ時も同様）
                         if position.direction == 'long_spread':
-                            # long_spread時にsymbol1を売却していた → 買い戻してロング再構築
                             rollback_side = 'buy'
                         else:
-                            # short_spread時にsymbol1を買い戻していた → 売却してショート再構築
                             rollback_side = 'sell'
 
-                        rollback_order = self.order_executor.create_market_order(
-                            position.symbol1,
-                            rollback_side,
-                            position.size1
-                        )
+                        rollback_success = False
+                        max_rollback_retries = 3
 
-                        if rollback_order and rollback_order.get('status') in ['closed', 'filled']:
-                            logger.warning(f"      ✓ ロールバック成功: {position.symbol1} {rollback_side}")
-                            logger.warning(f"         → ヘッジ状態を復元しました")
+                        for retry_attempt in range(max_rollback_retries):
+                            if retry_attempt > 0:
+                                import time
+                                wait_time = 2 ** retry_attempt
+                                logger.warning(f"      リトライ {retry_attempt}/{max_rollback_retries-1}: {wait_time}秒待機...")
+                                time.sleep(wait_time)
 
-                            # ロールバック成功を通知
-                            self.notifier.notify_error(
-                                'ペア取引クローズ・ロールバック',
-                                f'ペア: {position.pair_id}\n'
-                                f'Order2決済失敗のため、Order1をロールバックしました。\n'
-                                f'{position.symbol1}: {rollback_side} {position.size1:.6f}\n'
-                                f'ヘッジ状態を維持しています。'
+                            rollback_order = self.order_executor.create_market_order(
+                                position.symbol1,
+                                rollback_side,
+                                position.size1
                             )
-                        else:
-                            # ロールバック失敗 → CRITICAL（片側だけクローズされた状態）
-                            logger.error(f"      ✗✗✗ ロールバック失敗: {position.symbol1}")
+
+                            if rollback_order and rollback_order.get('status') in ['closed', 'filled']:
+                                logger.warning(f"      ✓ ロールバック成功（試行{retry_attempt+1}回目）: {position.symbol1} {rollback_side}")
+                                logger.warning(f"         → ヘッジ状態を復元しました")
+                                rollback_success = True
+
+                                # ロールバック成功を通知
+                                self.notifier.notify_error(
+                                    'ペア取引クローズ・ロールバック',
+                                    f'ペア: {position.pair_id}\n'
+                                    f'Order2決済失敗のため、Order1をロールバックしました（{retry_attempt+1}回目で成功）。\n'
+                                    f'{position.symbol1}: {rollback_side} {position.size1:.6f}\n'
+                                    f'ヘッジ状態を維持しています。'
+                                )
+                                break
+                            else:
+                                logger.warning(f"      ✗ ロールバック失敗（試行{retry_attempt+1}回目）")
+
+                        if not rollback_success:
+                            # 全リトライ失敗 → CRITICAL
+                            logger.error(f"      ✗✗✗ ロールバック全{max_rollback_retries}回失敗: {position.symbol1}")
                             logger.error(f"         → 片側だけクローズされています！")
 
                             # 緊急通知
@@ -1760,7 +1796,8 @@ class CryptoTrader:
                             self._set_safe_mode(True, "ポジション復元失敗")
                             logger.critical("🚨 セーフモード移行: ロールバック失敗のため新規エントリーを停止")
                     except Exception as rollback_error:
-                        logger.error(f"      ✗✗✗ ロールバック処理エラー: {rollback_error}")
+                        # LOW-2: スタックトレース付きでログ
+                        logger.error(f"      ✗✗✗ ロールバック処理エラー: {rollback_error}", exc_info=True)
 
                         # 緊急通知
                         self.notifier.notify_error(
