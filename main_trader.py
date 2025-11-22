@@ -364,7 +364,6 @@ class CryptoTrader:
                 return
 
             # pending_execution状態のポジションを古い順にチェック
-            from datetime import datetime, timedelta
             now_timestamp = int(datetime.now().timestamp())
             five_minutes_ago = now_timestamp - 300  # 5分前
 
@@ -391,8 +390,6 @@ class CryptoTrader:
 
                     # openステータスのポジションのみ復元
                     if row['status'] == 'open':
-                        from trading.position_manager import Position
-
                         position = Position(
                             symbol=row['symbol'],
                             side=row['side'],
@@ -468,7 +465,6 @@ class CryptoTrader:
 
             logger.info(f"\n[調整] execution_unknown状態のポジション: {len(unknown_positions)}件")
 
-            from datetime import datetime
             now_timestamp = int(datetime.now().timestamp())
 
             for pos in unknown_positions:
@@ -1131,8 +1127,6 @@ class CryptoTrader:
                         logger.warning(f"  ⏱️  API タイムアウト: {api_error}")
                         logger.info(f"  → 注文状態を再確認します（指数バックオフリトライ）...")
 
-                        import time
-
                         # ✨ 指数バックオフで注文状態確認リトライ（定数から読み込み）
                         order_status = None
 
@@ -1588,7 +1582,6 @@ class CryptoTrader:
 
                                 for retry_attempt in range(MAX_ROLLBACK_RETRIES):
                                     if retry_attempt > 0:
-                                        import time
                                         wait_time = ROLLBACK_RETRY_WAIT_BASE ** retry_attempt  # 指数バックオフ: 2s, 4s
                                         logger.warning(f"      リトライ {retry_attempt}/{MAX_ROLLBACK_RETRIES-1}: {wait_time}秒待機...")
                                         time.sleep(wait_time)
@@ -1765,7 +1758,6 @@ class CryptoTrader:
 
                         for retry_attempt in range(MAX_ROLLBACK_RETRIES):
                             if retry_attempt > 0:
-                                import time
                                 wait_time = ROLLBACK_RETRY_WAIT_BASE ** retry_attempt
                                 logger.warning(f"      リトライ {retry_attempt}/{MAX_ROLLBACK_RETRIES-1}: {wait_time}秒待機...")
                                 time.sleep(wait_time)
