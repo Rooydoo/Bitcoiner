@@ -889,39 +889,77 @@ class CryptoTrader:
                 logger.info(f"      {position.symbol1}: {position.size1:.6f}")
                 logger.info(f"      {position.symbol2}: {position.size2:.6f}")
 
-                # データベースに永続化
-                self.db_manager.create_pair_position({
-                    'pair_id': position.pair_id,
-                    'symbol1': position.symbol1,
-                    'symbol2': position.symbol2,
-                    'direction': position.direction,
-                    'hedge_ratio': position.hedge_ratio,
-                    'entry_spread': position.entry_spread,
-                    'entry_z_score': position.entry_z_score,
-                    'entry_time': int(position.entry_time.timestamp()),
-                    'size1': position.size1,
-                    'size2': position.size2,
-                    'entry_price1': position.entry_price1,
-                    'entry_price2': position.entry_price2,
-                    'entry_capital': position.entry_capital
-                })
+                # 実際の注文実行
+                orders_success = True
 
-                # Telegram通知
-                self.notifier.notify_pair_trade_open(
-                    pair_id=position.pair_id,
-                    symbol1=position.symbol1,
-                    symbol2=position.symbol2,
-                    direction=position.direction,
-                    size1=position.size1,
-                    size2=position.size2,
-                    price1=price1,
-                    price2=price2,
-                    z_score=signal.z_score,
-                    hedge_ratio=signal.hedge_ratio
-                )
+                # 注文1: symbol1
+                if position.direction == 'long_spread':
+                    # long_spread: symbol1を買い、symbol2を売り
+                    order1 = self.order_executor.create_market_order(position.symbol1, 'buy', position.size1)
+                else:
+                    # short_spread: symbol1を売り、symbol2を買い
+                    order1 = self.order_executor.create_market_order(position.symbol1, 'sell', position.size1)
+
+                if not order1 or order1.get('status') not in ['closed', 'filled']:
+                    logger.error(f"      ✗ {position.symbol1} 注文失敗")
+                    orders_success = False
+
+                # 注文2: symbol2
+                if orders_success:
+                    if position.direction == 'long_spread':
+                        # long_spread: symbol2を売り
+                        order2 = self.order_executor.create_market_order(position.symbol2, 'sell', position.size2)
+                    else:
+                        # short_spread: symbol2を買い
+                        order2 = self.order_executor.create_market_order(position.symbol2, 'buy', position.size2)
+
+                    if not order2 or order2.get('status') not in ['closed', 'filled']:
+                        logger.error(f"      ✗ {position.symbol2} 注文失敗")
+                        orders_success = False
+
+                # 両方成功した場合のみDB保存と通知
+                if orders_success:
+                    logger.info(f"      ✓ 両方の注文実行成功")
+
+                    # データベースに永続化
+                    self.db_manager.create_pair_position({
+                        'pair_id': position.pair_id,
+                        'symbol1': position.symbol1,
+                        'symbol2': position.symbol2,
+                        'direction': position.direction,
+                        'hedge_ratio': position.hedge_ratio,
+                        'entry_spread': position.entry_spread,
+                        'entry_z_score': position.entry_z_score,
+                        'entry_time': int(position.entry_time.timestamp()),
+                        'size1': position.size1,
+                        'size2': position.size2,
+                        'entry_price1': position.entry_price1,
+                        'entry_price2': position.entry_price2,
+                        'entry_capital': position.entry_capital
+                    })
+
+                    # Telegram通知
+                    self.notifier.notify_pair_trade_open(
+                        pair_id=position.pair_id,
+                        symbol1=position.symbol1,
+                        symbol2=position.symbol2,
+                        direction=position.direction,
+                        size1=position.size1,
+                        size2=position.size2,
+                        price1=price1,
+                        price2=price2,
+                        z_score=signal.z_score,
+                        hedge_ratio=signal.hedge_ratio
+                    )
+                else:
+                    # 注文失敗時はポジションを削除
+                    logger.error(f"      ✗ 注文失敗のためポジション削除")
+                    if position.pair_id in self.pair_trading_strategy.positions:
+                        del self.pair_trading_strategy.positions[position.pair_id]
 
         except Exception as e:
             logger.error(f"ペアエントリーエラー: {e}")
+            logger.error(traceback.format_exc())
 
     def _close_pair_position(self, position, price1: float, price2: float, reason: str):
         """ペアポジションクローズ"""
@@ -933,6 +971,48 @@ class CryptoTrader:
                 hours = int(duration.total_seconds() // 3600)
                 minutes = int((duration.total_seconds() % 3600) // 60)
                 hold_duration = f"{hours}時間{minutes}分"
+
+            # 実際の決済注文実行
+            logger.info(f"    ペアポジション決済開始: {position.pair_id}")
+            orders_success = True
+
+            # 注文1: symbol1を決済
+            if position.direction == 'long_spread':
+                # long_spread時にsymbol1を買っていた → 売却
+                order1 = self.order_executor.create_market_order(position.symbol1, 'sell', position.size1)
+            else:
+                # short_spread時にsymbol1を売っていた → 買い戻し
+                order1 = self.order_executor.create_market_order(position.symbol1, 'buy', position.size1)
+
+            if not order1 or order1.get('status') not in ['closed', 'filled']:
+                logger.error(f"      ✗ {position.symbol1} 決済注文失敗")
+                orders_success = False
+
+            # 注文2: symbol2を決済
+            if orders_success:
+                if position.direction == 'long_spread':
+                    # long_spread時にsymbol2を売っていた → 買い戻し
+                    order2 = self.order_executor.create_market_order(position.symbol2, 'buy', position.size2)
+                else:
+                    # short_spread時にsymbol2を買っていた → 売却
+                    order2 = self.order_executor.create_market_order(position.symbol2, 'sell', position.size2)
+
+                if not order2 or order2.get('status') not in ['closed', 'filled']:
+                    logger.error(f"      ✗ {position.symbol2} 決済注文失敗")
+                    orders_success = False
+
+            # 両方の決済注文が成功した場合のみ処理を続行
+            if not orders_success:
+                logger.error(f"      ✗ ペアポジション決済失敗: {position.pair_id}")
+                logger.error(f"      一部注文のみ成功の可能性あり - 手動確認が必要です")
+                self.notifier.notify_error(
+                    'ペアポジション決済エラー',
+                    f'ペア {position.pair_id} の決済注文が失敗しました。取引所で状態を確認してください。'
+                )
+                return
+
+            # 決済成功 - メモリから削除、損益計算
+            logger.info(f"      ✓ 両方の決済注文実行成功")
 
             closed_position, pnl = self.pair_trading_strategy.close_position(
                 position.pair_id, price1, price2, reason
