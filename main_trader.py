@@ -98,6 +98,11 @@ class CryptoTrader:
         self.config = ConfigLoader(config_path)
         self.trading_pairs = self.config.get('trading_pairs', [])
 
+        # 取引設定を保存（DRY: 複数箇所での重複取得を防ぐ）
+        trading_config = self.config.get('trading', {})
+        self.initial_capital = trading_config.get('initial_capital', 200000)
+        self.min_confidence = trading_config.get('min_confidence', 0.6)
+
         # ヘルスチェッカー・パフォーマンストラッカー初期化
         self.health_checker = HealthChecker()
         self.performance_tracker = None  # 後で初期化
@@ -699,7 +704,7 @@ class CryptoTrader:
             try:
                 signal = self.ensemble_model.generate_trading_signal(
                     df,
-                    confidence_threshold=self.config.get('trading', {}).get('min_confidence', 0.6)
+                    confidence_threshold=self.min_confidence
                 )
             except Exception as model_error:
                 logger.error(f"{symbol} モデル予測エラー: {model_error}")
@@ -1022,9 +1027,9 @@ class CryptoTrader:
                 # エントリー可否チェック
                 should_enter, reason = self.risk_manager.should_enter_trade(
                     signal_confidence=signal['confidence'],
-                    min_confidence=self.config.get('trading', {}).get('min_confidence', 0.6),
+                    min_confidence=self.min_confidence,
                     current_equity=available_capital,
-                    initial_capital=self.config.get('trading', {}).get('initial_capital', 200000)
+                    initial_capital=self.initial_capital
                 )
 
                 if not should_enter:
@@ -1297,8 +1302,7 @@ class CryptoTrader:
                     logger.info(f"    部分損益: ¥{partial_info['partial_pnl']:,.0f} ({partial_info['partial_pnl_pct']:+.2f}%)")
 
                     # リスク管理に取引結果を記録（部分決済）
-                    initial_capital = self.config.get('trading', {}).get('initial_capital', 200000)
-                    self.risk_manager.record_trade_result(partial_info['partial_pnl'], initial_capital)
+                    self.risk_manager.record_trade_result(partial_info['partial_pnl'], self.initial_capital)
 
                     # Telegram通知
                     self.notifier.notify_take_profit(
@@ -1349,8 +1353,7 @@ class CryptoTrader:
                     logger.info(f"    実現損益: ¥{pnl:,.0f} ({pnl_pct:+.2f}%)")
 
                     # リスク管理に取引結果を記録
-                    initial_capital = self.config.get('trading', {}).get('initial_capital', 200000)
-                    self.risk_manager.record_trade_result(pnl, initial_capital)
+                    self.risk_manager.record_trade_result(pnl, self.initial_capital)
 
                     # 利益確定トラッキングをリセット
                     self.risk_manager.reset_profit_tracking(symbol)
@@ -1854,8 +1857,7 @@ class CryptoTrader:
                 )
 
             # リスク管理に記録
-            initial_capital = self.config.get('trading', {}).get('initial_capital', 200000)
-            self.risk_manager.record_trade_result(pnl, initial_capital)
+            self.risk_manager.record_trade_result(pnl, self.initial_capital)
 
             # Telegram通知
             self.notifier.notify_pair_trade_close(
