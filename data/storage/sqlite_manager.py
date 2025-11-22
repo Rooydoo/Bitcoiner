@@ -322,35 +322,37 @@ class SQLiteManager:
             挿入されたレコードID
         """
         conn = sqlite3.connect(self.trades_db)
-        cursor = conn.cursor()
+        try:
+            cursor = conn.cursor()
 
-        cursor.execute("""
-        INSERT INTO trades (
-            symbol, side, order_type, price, amount, cost, fee, fee_currency,
-            timestamp, order_id, position_id, profit_loss, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            trade_data['symbol'],
-            trade_data['side'],
-            trade_data['order_type'],
-            trade_data['price'],
-            trade_data['amount'],
-            trade_data['cost'],
-            trade_data.get('fee', 0),
-            trade_data.get('fee_currency', 'USDT'),
-            trade_data['timestamp'],
-            trade_data.get('order_id'),
-            trade_data.get('position_id'),
-            trade_data.get('profit_loss'),
-            trade_data.get('notes')
-        ))
+            cursor.execute("""
+            INSERT INTO trades (
+                symbol, side, order_type, price, amount, cost, fee, fee_currency,
+                timestamp, order_id, position_id, profit_loss, notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                trade_data['symbol'],
+                trade_data['side'],
+                trade_data['order_type'],
+                trade_data['price'],
+                trade_data['amount'],
+                trade_data['cost'],
+                trade_data.get('fee', 0),
+                trade_data.get('fee_currency', 'JPY'),
+                trade_data['timestamp'],
+                trade_data.get('order_id'),
+                trade_data.get('position_id'),
+                trade_data.get('profit_loss'),
+                trade_data.get('notes')
+            ))
 
-        trade_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
+            trade_id = cursor.lastrowid
+            conn.commit()
 
-        logger.info(f"取引記録: {trade_data['symbol']} {trade_data['side']} @ {trade_data['price']}")
-        return trade_id
+            logger.info(f"取引記録: {trade_data['symbol']} {trade_data['side']} @ {trade_data['price']}")
+            return trade_id
+        finally:
+            conn.close()
 
     def create_position(self, position_data: Dict[str, Any]) -> str:
         """
@@ -363,30 +365,32 @@ class SQLiteManager:
             ポジションID
         """
         conn = sqlite3.connect(self.trades_db)
-        cursor = conn.cursor()
+        try:
+            cursor = conn.cursor()
 
-        cursor.execute("""
-        INSERT INTO positions (
-            position_id, symbol, side, entry_price, entry_amount, entry_time,
-            stop_loss, take_profit, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            position_data['position_id'],
-            position_data['symbol'],
-            position_data['side'],
-            position_data['entry_price'],
-            position_data['entry_amount'],
-            position_data['entry_time'],
-            position_data.get('stop_loss'),
-            position_data.get('take_profit'),
-            'open'
-        ))
+            cursor.execute("""
+            INSERT INTO positions (
+                position_id, symbol, side, entry_price, entry_amount, entry_time,
+                stop_loss, take_profit, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                position_data['position_id'],
+                position_data['symbol'],
+                position_data['side'],
+                position_data['entry_price'],
+                position_data['entry_amount'],
+                position_data['entry_time'],
+                position_data.get('stop_loss'),
+                position_data.get('take_profit'),
+                'open'
+            ))
 
-        conn.commit()
-        conn.close()
+            conn.commit()
 
-        logger.info(f"ポジション作成: {position_data['position_id']}")
-        return position_data['position_id']
+            logger.info(f"ポジション作成: {position_data['position_id']}")
+            return position_data['position_id']
+        finally:
+            conn.close()
 
     def update_position(self, position_id: str, updates: Dict[str, Any]):
         """
@@ -397,20 +401,35 @@ class SQLiteManager:
             updates: 更新データ
         """
         conn = sqlite3.connect(self.trades_db)
-        cursor = conn.cursor()
+        try:
+            cursor = conn.cursor()
 
-        # 更新SQLを動的に生成
-        set_clause = ", ".join([f"{key} = ?" for key in updates.keys()])
-        set_clause += ", updated_at = strftime('%s', 'now')"
+            # 許可されたカラム名のホワイトリスト
+            ALLOWED_POSITION_COLUMNS = {
+                'exit_price', 'exit_amount', 'exit_time', 'status',
+                'profit_loss', 'profit_loss_pct', 'stop_loss', 'take_profit'
+            }
 
-        query = f"UPDATE positions SET {set_clause} WHERE position_id = ?"
-        values = list(updates.values()) + [position_id]
+            # カラム名を検証
+            validated_updates = {k: v for k, v in updates.items() if k in ALLOWED_POSITION_COLUMNS}
 
-        cursor.execute(query, values)
-        conn.commit()
-        conn.close()
+            if not validated_updates:
+                logger.warning(f"有効な更新カラムがありません: {list(updates.keys())}")
+                return
 
-        logger.debug(f"ポジション更新: {position_id}")
+            # 更新SQLを動的に生成
+            set_clause = ", ".join([f"{key} = ?" for key in validated_updates.keys()])
+            set_clause += ", updated_at = strftime('%s', 'now')"
+
+            query = f"UPDATE positions SET {set_clause} WHERE position_id = ?"
+            values = list(validated_updates.values()) + [position_id]
+
+            cursor.execute(query, values)
+            conn.commit()
+
+            logger.debug(f"ポジション更新: {position_id}")
+        finally:
+            conn.close()
 
     # ========== ペアポジション操作メソッド ==========
 
@@ -425,36 +444,38 @@ class SQLiteManager:
             ペアID
         """
         conn = sqlite3.connect(self.trades_db)
-        cursor = conn.cursor()
+        try:
+            cursor = conn.cursor()
 
-        cursor.execute("""
-        INSERT INTO pair_positions (
-            pair_id, symbol1, symbol2, direction, hedge_ratio,
-            entry_spread, entry_z_score, entry_time,
-            size1, size2, entry_price1, entry_price2, entry_capital, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            position_data['pair_id'],
-            position_data['symbol1'],
-            position_data['symbol2'],
-            position_data['direction'],
-            position_data['hedge_ratio'],
-            position_data['entry_spread'],
-            position_data['entry_z_score'],
-            position_data['entry_time'],
-            position_data['size1'],
-            position_data['size2'],
-            position_data['entry_price1'],
-            position_data['entry_price2'],
-            position_data['entry_capital'],
-            'open'
-        ))
+            cursor.execute("""
+            INSERT INTO pair_positions (
+                pair_id, symbol1, symbol2, direction, hedge_ratio,
+                entry_spread, entry_z_score, entry_time,
+                size1, size2, entry_price1, entry_price2, entry_capital, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                position_data['pair_id'],
+                position_data['symbol1'],
+                position_data['symbol2'],
+                position_data['direction'],
+                position_data['hedge_ratio'],
+                position_data['entry_spread'],
+                position_data['entry_z_score'],
+                position_data['entry_time'],
+                position_data['size1'],
+                position_data['size2'],
+                position_data['entry_price1'],
+                position_data['entry_price2'],
+                position_data['entry_capital'],
+                'open'
+            ))
 
-        conn.commit()
-        conn.close()
+            conn.commit()
 
-        logger.info(f"ペアポジション作成: {position_data['pair_id']}")
-        return position_data['pair_id']
+            logger.info(f"ペアポジション作成: {position_data['pair_id']}")
+            return position_data['pair_id']
+        finally:
+            conn.close()
 
     def update_pair_position(self, pair_id: str, updates: Dict[str, Any]):
         """
@@ -465,19 +486,34 @@ class SQLiteManager:
             updates: 更新データ
         """
         conn = sqlite3.connect(self.trades_db)
-        cursor = conn.cursor()
+        try:
+            cursor = conn.cursor()
 
-        set_clause = ", ".join([f"{key} = ?" for key in updates.keys()])
-        set_clause += ", updated_at = strftime('%s', 'now')"
+            # 許可されたカラム名のホワイトリスト
+            ALLOWED_PAIR_COLUMNS = {
+                'exit_spread', 'exit_z_score', 'exit_time', 'exit_price1', 'exit_price2',
+                'status', 'profit_loss', 'profit_loss_pct', 'unrealized_pnl', 'max_pnl'
+            }
 
-        query = f"UPDATE pair_positions SET {set_clause} WHERE pair_id = ?"
-        values = list(updates.values()) + [pair_id]
+            # カラム名を検証
+            validated_updates = {k: v for k, v in updates.items() if k in ALLOWED_PAIR_COLUMNS}
 
-        cursor.execute(query, values)
-        conn.commit()
-        conn.close()
+            if not validated_updates:
+                logger.warning(f"有効な更新カラムがありません: {list(updates.keys())}")
+                return
 
-        logger.debug(f"ペアポジション更新: {pair_id}")
+            set_clause = ", ".join([f"{key} = ?" for key in validated_updates.keys()])
+            set_clause += ", updated_at = strftime('%s', 'now')"
+
+            query = f"UPDATE pair_positions SET {set_clause} WHERE pair_id = ?"
+            values = list(validated_updates.values()) + [pair_id]
+
+            cursor.execute(query, values)
+            conn.commit()
+
+            logger.debug(f"ペアポジション更新: {pair_id}")
+        finally:
+            conn.close()
 
     def close_pair_position(self, pair_id: str, exit_data: Dict[str, Any]):
         """

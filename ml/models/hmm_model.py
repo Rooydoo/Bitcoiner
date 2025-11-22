@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import logging
 from typing import Tuple, List, Optional, Dict
-import pickle
+import joblib
 from pathlib import Path
 from hmmlearn import hmm
 from sklearn.preprocessing import StandardScaler
@@ -307,8 +307,7 @@ class MarketRegimeHMM:
             'is_fitted': self.is_fitted
         }
 
-        with open(filepath, 'wb') as f:
-            pickle.dump(model_data, f)
+        joblib.dump(model_data, filepath, compress=3)
 
         logger.info(f"HMMモデル保存: {filepath}")
 
@@ -319,8 +318,7 @@ class MarketRegimeHMM:
         Args:
             filepath: 読み込み元パス
         """
-        with open(filepath, 'rb') as f:
-            model_data = pickle.load(f)
+        model_data = joblib.load(filepath)
 
         self.model = model_data['model']
         self.scaler = model_data['scaler']
