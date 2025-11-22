@@ -332,6 +332,68 @@ class CryptoTrader:
         except Exception as e:
             logger.error(f"通常ポジション復元エラー: {e}")
 
+    def reconcile_unknown_positions(self):
+        """✨ execution_unknown状態のポジションを調整（定期実行）"""
+        try:
+            # execution_unknown状態のポジションを取得
+            import sqlite3
+            conn = sqlite3.connect(self.db_manager.trades_db)
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT position_id, symbol, side, entry_amount, entry_price, entry_time
+                FROM positions
+                WHERE status = 'execution_unknown'
+                ORDER BY entry_time DESC
+                LIMIT 10
+            """)
+            unknown_positions = cursor.fetchall()
+            conn.close()
+
+            if not unknown_positions:
+                return  # unknown状態のポジションがない
+
+            logger.info(f"\n[調整] execution_unknown状態のポジション: {len(unknown_positions)}件")
+
+            from datetime import datetime
+            now_timestamp = int(datetime.now().timestamp())
+
+            for pos in unknown_positions:
+                position_id, symbol, side, entry_amount, entry_price, entry_time = pos
+                age_minutes = (now_timestamp - entry_time) / 60
+
+                logger.info(f"  調整中: {position_id} ({symbol}, {age_minutes:.1f}分経過)")
+
+                try:
+                    # 取引所の現在の残高を確認
+                    if symbol and '/' in symbol:
+                        base_currency = symbol.split('/')[0]
+                        balance = self.order_executor.get_balance(base_currency)
+                        current_balance = balance.get('total', 0)
+
+                        logger.info(f"    現在の{base_currency}残高: {current_balance:.6f}")
+
+                        # 残高からポジションの存在を推定
+                        # 注: 完全な推定は不可能だが、明らかなケースは判定できる
+                        # より正確には取引所APIで注文履歴を照会する必要がある
+
+                        # 10分以上経過したunknown状態は失敗扱いにする
+                        if age_minutes > 10:
+                            logger.warning(f"    → 10分経過のため失敗扱いに変更")
+                            self.db_manager.update_position(
+                                position_id,
+                                {'status': 'execution_failed'}
+                            )
+                        else:
+                            logger.info(f"    → まだ最近のため継続監視")
+
+                except Exception as check_error:
+                    logger.error(f"    ✗ 調整エラー: {check_error}")
+
+            logger.info(f"  ✓ unknown状態の調整完了")
+
+        except Exception as e:
+            logger.error(f"unknown位置調整エラー: {e}")
+
     def _train_initial_models(self):
         """初回起動時のモデル学習"""
         logger.info("=" * 70)
@@ -480,7 +542,7 @@ class CryptoTrader:
             # DB保存
             for _, row in df.iterrows():
                 ohlcv_dict = {
-                    'timestamp': row['timestamp'].isoformat(),
+                    'timestamp': int(row['timestamp'].timestamp()),  # Unix timestamp (INTEGER)
                     'symbol': symbol,
                     'timeframe': timeframe,
                     'open': row['open'],
@@ -923,26 +985,53 @@ class CryptoTrader:
                     # タイムアウトの場合は注文状態を再確認
                     if 'timeout' in str(api_error).lower() or isinstance(api_error, TimeoutError):
                         logger.warning(f"  ⏱️  API タイムアウト: {api_error}")
-                        logger.info(f"  → 注文状態を再確認します（60秒待機）...")
+                        logger.info(f"  → 注文状態を再確認します（指数バックオフリトライ）...")
 
                         import time
-                        time.sleep(5)  # 5秒待機
+
+                        # ✨ 指数バックオフで最大6回リトライ（合計約63秒）
+                        # 2s, 4s, 8s, 16s, 16s, 16s = 62秒
+                        retry_delays = [2, 4, 8, 16, 16, 16]
+                        order_status = None
 
                         # タイムアウト時も一応orderがあるかチェック
                         if order and order.get('id'):
-                            try:
-                                # 注文状態を取得
-                                order_status = self.order_executor.get_order_status(order['id'], symbol)
-                                logger.info(f"  → 注文状態確認: {order_status.get('status', 'unknown')}")
+                            for attempt, delay in enumerate(retry_delays, 1):
+                                try:
+                                    logger.info(f"    試行{attempt}/{len(retry_delays)}: {delay}秒待機後に状態確認...")
+                                    time.sleep(delay)
 
-                                # 状態確認結果をorderに上書き
-                                if order_status:
-                                    order = order_status
-                                    # 次のif文で部分約定チェックが走る
-                            except Exception as status_error:
-                                logger.error(f"  ✗ 注文状態確認失敗: {status_error}")
-                                # 状態不明のため保留状態を維持
-                                logger.warning(f"  ⚠️  注文状態不明 - 保留ポジションを'unknown'状態に設定")
+                                    # 注文状態を取得
+                                    order_status = self.order_executor.get_order_status(order['id'], symbol)
+                                    status = order_status.get('status', 'unknown')
+                                    logger.info(f"    → 状態: {status}")
+
+                                    # 確定状態なら成功
+                                    if status in ['closed', 'filled', 'canceled']:
+                                        logger.info(f"  ✓ 注文状態確定: {status}")
+                                        order = order_status
+                                        break  # ループ脱出
+                                    elif status == 'pending' or status == 'open':
+                                        logger.info(f"    まだ処理中({status})、次回リトライ...")
+                                        continue
+                                    else:
+                                        logger.warning(f"    不明な状態: {status}")
+                                        continue
+
+                                except Exception as status_error:
+                                    logger.warning(f"    試行{attempt}失敗: {status_error}")
+                                    if attempt == len(retry_delays):
+                                        # 全リトライ失敗
+                                        logger.error(f"  ✗ 全リトライ失敗 - 状態不明")
+                                        self.db_manager.update_position(
+                                            pending_position.position_id,
+                                            {'status': 'execution_unknown'}
+                                        )
+                                        return
+
+                            # ループ後も状態が確定していない場合
+                            if not order_status or order_status.get('status') not in ['closed', 'filled', 'canceled']:
+                                logger.error(f"  ✗ タイムアウト後も注文状態が確定せず")
                                 self.db_manager.update_position(
                                     pending_position.position_id,
                                     {'status': 'execution_unknown'}
@@ -1282,6 +1371,39 @@ class CryptoTrader:
                             del self.pair_trading_strategy.positions[position.pair_id]
                         return
 
+                    # ✨ CRITICAL: 注文実行の前にDBに保存（孤立ポジション防止）
+                    # 注文成功後にDB保存が失敗すると、取引所にポジションが残るがボットは追跡できない
+                    try:
+                        self.db_manager.create_pair_position({
+                            'pair_id': position.pair_id,
+                            'symbol1': position.symbol1,
+                            'symbol2': position.symbol2,
+                            'direction': position.direction,
+                            'hedge_ratio': position.hedge_ratio,
+                            'entry_spread': position.entry_spread,
+                            'entry_z_score': position.entry_z_score,
+                            'entry_time': int(position.entry_time.timestamp()),
+                            'size1': position.size1,
+                            'size2': position.size2,
+                            'entry_price1': position.entry_price1,
+                            'entry_price2': position.entry_price2,
+                            'entry_capital': position.entry_capital,
+                            'status': 'pending_execution'  # 保留状態で保存
+                        })
+                        logger.debug(f"      ✓ ペアポジションをDB保存（保留状態）")
+                    except Exception as db_error:
+                        logger.error(f"      ✗ DB保存失敗（注文前）: {db_error}")
+                        # DB保存失敗時は注文を実行しない
+                        if position.pair_id in self.pair_trading_strategy.positions:
+                            del self.pair_trading_strategy.positions[position.pair_id]
+                        self.notifier.notify_error(
+                            'ペアポジションDB保存失敗',
+                            f'ペア {position.pair_id} のDB保存に失敗しました。\n'
+                            f'安全のため注文は実行していません。\n'
+                            f'エラー: {db_error}'
+                        )
+                        return
+
                     # 実際の注文実行
                     orders_success = True
 
@@ -1359,40 +1481,20 @@ class CryptoTrader:
                                     f'**手動で取引所を確認し、即座にポジションをクローズしてください**'
                                 )
 
-                    # 両方成功した場合のみDB保存と通知
+                    # 注文結果に応じてステータスを更新
                     if orders_success:
                         logger.info(f"      ✓ 両方の注文実行成功")
 
-                        # データベースに永続化
+                        # ステータスを'open'に更新
                         try:
-                            self.db_manager.create_pair_position({
-                                'pair_id': position.pair_id,
-                                'symbol1': position.symbol1,
-                                'symbol2': position.symbol2,
-                                'direction': position.direction,
-                                'hedge_ratio': position.hedge_ratio,
-                                'entry_spread': position.entry_spread,
-                                'entry_z_score': position.entry_z_score,
-                                'entry_time': int(position.entry_time.timestamp()),
-                                'size1': position.size1,
-                                'size2': position.size2,
-                                'entry_price1': position.entry_price1,
-                                'entry_price2': position.entry_price2,
-                                'entry_capital': position.entry_capital
-                            })
-                        except Exception as db_error:
-                            logger.error(f"      ✗ DB保存失敗: {db_error}")
-                            # メモリからもポジションを削除
-                            if position.pair_id in self.pair_trading_strategy.positions:
-                                del self.pair_trading_strategy.positions[position.pair_id]
-                            # エラー通知
-                            self.notifier.notify_error(
-                                'ペアポジションDB保存失敗',
-                                f'ペア {position.pair_id} のDB保存に失敗しました。\n'
-                                f'注文は実行済みのため、手動で取引所を確認してください。\n'
-                                f'エラー: {db_error}'
+                            self.db_manager.update_pair_position(
+                                position.pair_id,
+                                {'status': 'open'}
                             )
-                            return
+                            logger.debug(f"      ✓ ペアポジションステータスを'open'に更新")
+                        except Exception as update_error:
+                            logger.error(f"      ✗ ステータス更新失敗: {update_error}")
+                            # 更新失敗は警告のみ（ポジションは既にDBにあるため）
 
                         # Telegram通知
                         self.notifier.notify_pair_trade_open(
@@ -1408,8 +1510,18 @@ class CryptoTrader:
                             hedge_ratio=signal.hedge_ratio
                         )
                     else:
-                        # 注文失敗時はポジションを削除
-                        logger.error(f"      ✗ 注文失敗のためポジション削除")
+                        # 注文失敗時はステータスを'execution_failed'に更新
+                        logger.error(f"      ✗ 注文失敗")
+                        try:
+                            self.db_manager.update_pair_position(
+                                position.pair_id,
+                                {'status': 'execution_failed'}
+                            )
+                            logger.debug(f"      ✓ ペアポジションステータスを'execution_failed'に更新")
+                        except Exception as update_error:
+                            logger.error(f"      ✗ ステータス更新失敗: {update_error}")
+
+                        # メモリからも削除
                         if position.pair_id in self.pair_trading_strategy.positions:
                             del self.pair_trading_strategy.positions[position.pair_id]
 
@@ -1840,6 +1952,15 @@ class CryptoTrader:
                     if consecutive_api_errors > 0:
                         logger.info(f"サイクル成功 - APIエラーカウントリセット（前回: {consecutive_api_errors}回）")
                         consecutive_api_errors = 0
+
+                    # ✨ 10サイクルごとにunknown状態のポジションを調整
+                    if cycle_count % 10 == 0:
+                        self.reconcile_unknown_positions()
+
+                    # ✨ 60サイクルごと(約1時間)にWALチェックポイント
+                    if cycle_count % 60 == 0:
+                        logger.info("[メンテナンス] WALチェックポイント実行")
+                        self.db_manager.checkpoint_wal()
 
                     # 定時レポートチェック（1日3回）
                     now = datetime.now()

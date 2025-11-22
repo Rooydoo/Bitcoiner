@@ -4,6 +4,7 @@
 """
 
 import logging
+import threading
 from typing import Dict, Optional, List
 from datetime import datetime
 from data.storage.sqlite_manager import SQLiteManager
@@ -128,6 +129,9 @@ class PositionManager:
         self.open_positions: Dict[str, Position] = {}  # symbol -> Position
         self.closed_positions: List[Position] = []
 
+        # ✨ 並行処理ロック（ポジション作成の競合状態を防止）
+        self.position_lock = threading.Lock()
+
         logger.info("ポジション管理システム初期化")
 
     def open_position(
@@ -149,36 +153,38 @@ class PositionManager:
         Returns:
             Positionインスタンス
         """
-        # 既存のポジションがある場合はエラー
-        if symbol in self.open_positions:
-            logger.error(f"{symbol}の既存ポジションがあります。先に既存ポジションを決済してください。")
-            return None
+        # ✨ ロック取得（競合状態を防止）
+        with self.position_lock:
+            # 既存のポジションがある場合はエラー
+            if symbol in self.open_positions:
+                logger.error(f"{symbol}の既存ポジションがあります。先に既存ポジションを決済してください。")
+                return None
 
-        # ショートポジション検証: bitFlyer現物市場では空売り不可
-        # FX_BTC_JPY以外でショートを試みた場合はエラー
-        if side == 'short' and not symbol.startswith('FX_'):
-            logger.error(f"現物市場 {symbol} ではショートポジションは取引できません。"
-                        f"ショートポジションはFX_BTC_JPYのみ対応しています。")
-            return None
+            # ショートポジション検証: bitFlyer現物市場では空売り不可
+            # FX_BTC_JPY以外でショートを試みた場合はエラー
+            if side == 'short' and not symbol.startswith('FX_'):
+                logger.error(f"現物市場 {symbol} ではショートポジションは取引できません。"
+                            f"ショートポジションはFX_BTC_JPYのみ対応しています。")
+                return None
 
-        position = Position(symbol, side, entry_price, quantity)
-        self.open_positions[symbol] = position
+            position = Position(symbol, side, entry_price, quantity)
+            self.open_positions[symbol] = position
 
-        # DBに保存
-        if self.db_manager:
-            position_data = {
-                'position_id': position.position_id,
-                'symbol': symbol,
-                'side': side,
-                'entry_price': entry_price,
-                'entry_amount': quantity,
-                'entry_time': int(position.entry_time.timestamp()),  # Unix timestamp
-                'status': 'open'
-            }
-            self.db_manager.create_position(position_data)
+            # DBに保存
+            if self.db_manager:
+                position_data = {
+                    'position_id': position.position_id,
+                    'symbol': symbol,
+                    'side': side,
+                    'entry_price': entry_price,
+                    'entry_amount': quantity,
+                    'entry_time': int(position.entry_time.timestamp()),  # Unix timestamp
+                    'status': 'open'
+                }
+                self.db_manager.create_position(position_data)
 
-        logger.info(f"ポジションオープン: {symbol} {side.upper()} "
-                   f"{quantity:.6f} @ ¥{entry_price:,.0f}")
+            logger.info(f"ポジションオープン: {symbol} {side.upper()} "
+                       f"{quantity:.6f} @ ¥{entry_price:,.0f}")
 
         return position
 
@@ -362,27 +368,66 @@ class PositionManager:
                    f"{close_ratio:.0%} ({partial_quantity:.6f} / {position.quantity:.6f}) "
                    f"損益=¥{partial_pnl_after_fees:,.0f} ({partial_pnl_pct:+.2f}%)")
 
-        # DBにトレード履歴を記録
+        # ✨ アトミックなDB操作: トレード記録とポジション更新を1トランザクションで実行
         if self.db_manager:
             from datetime import datetime
+            import sqlite3
+
             trade_data = {
                 'symbol': symbol,
                 'side': position.side,
                 'price': exit_price,
                 'amount': partial_quantity,
                 'cost': exit_price * partial_quantity,
-                'fee': entry_fee + exit_fee,  # 総手数料
+                'fee': entry_fee + exit_fee,
                 'order_type': 'market',
-                'profit_loss': partial_pnl_after_fees,  # フィールド名修正（pnl → profit_loss）
-                'timestamp': int(datetime.now().timestamp())  # Unix timestamp
+                'profit_loss': partial_pnl_after_fees,
+                'timestamp': int(datetime.now().timestamp())
             }
-            self.db_manager.insert_trade(trade_data)
 
-            # ポジションの数量を更新
-            updates = {
-                'entry_amount': remaining_quantity
-            }
-            self.db_manager.update_position(position.position_id, updates)
+            # トランザクション開始
+            conn = sqlite3.connect(self.db_manager.trades_db)
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+
+                # 1. トレード履歴を記録
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO trades (
+                        position_id, symbol, side, price, amount, cost,
+                        fee, fee_currency, order_type, profit_loss, timestamp
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    position.position_id,
+                    trade_data['symbol'],
+                    trade_data['side'],
+                    trade_data['price'],
+                    trade_data['amount'],
+                    trade_data['cost'],
+                    trade_data['fee'],
+                    'JPY',  # デフォルト
+                    trade_data['order_type'],
+                    trade_data['profit_loss'],
+                    trade_data['timestamp']
+                ))
+
+                # 2. ポジションの数量を更新
+                cursor.execute("""
+                    UPDATE positions
+                    SET entry_amount = ?
+                    WHERE position_id = ?
+                """, (remaining_quantity, position.position_id))
+
+                # コミット
+                conn.commit()
+                logger.debug(f"  ✓ 部分決済のDB記録完了（アトミック）")
+
+            except Exception as db_error:
+                conn.rollback()
+                logger.error(f"  ✗ 部分決済のDB記録失敗: {db_error}")
+                raise
+            finally:
+                conn.close()
 
         # ポジションの数量を更新
         position.quantity = remaining_quantity

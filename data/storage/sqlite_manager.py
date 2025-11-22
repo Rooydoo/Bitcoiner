@@ -743,6 +743,26 @@ class SQLiteManager:
             conn.close()
             logger.info(f"VACUUM実行: {db_path.name}")
 
+    def checkpoint_wal(self):
+        """✨ WALチェックポイント実行（WAL→メインDBへの永続化）"""
+        for db_path in [self.price_db, self.trades_db, self.ml_models_db]:
+            try:
+                conn = sqlite3.connect(db_path)
+                # TRUNCATE: WALファイルを切り詰め（サイズ削減）
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                result = cursor.fetchone()
+                # result = (0, pages_written, pages_checkpointed)
+                # 0 = success
+                if result and result[0] == 0:
+                    logger.debug(f"WALチェックポイント完了: {db_path.name} "
+                               f"(書込={result[1]}, CP={result[2]})")
+                else:
+                    logger.warning(f"WALチェックポイント警告: {db_path.name} result={result}")
+                conn.close()
+            except Exception as e:
+                logger.error(f"WALチェックポイント失敗: {db_path.name} - {e}")
+
     def get_database_sizes(self) -> Dict[str, float]:
         """
         データベースのサイズを取得
