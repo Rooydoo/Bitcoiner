@@ -129,12 +129,32 @@ class CryptoTrader:
 
         # ペアトレーディング戦略初期化（設定ファイルから読み込み）
         pt_config = self.config.get('pair_trading', {})
+
+        # CONFIG-1, MEDIUM-6: 設定値の検証
+        z_score_entry = pt_config.get('z_score_entry', 2.0)
+        z_score_exit = pt_config.get('z_score_exit', 0.5)
+        max_pairs = pt_config.get('max_pairs', 3)
+        position_size_pct = pt_config.get('position_size_pct', 0.1)
+
+        if z_score_entry <= 0 or z_score_entry > 10:
+            logger.warning(f"⚠️ z_score_entry={z_score_entry}は範囲外。デフォルト2.0使用")
+            z_score_entry = 2.0
+        if z_score_exit < 0 or z_score_exit >= z_score_entry:
+            logger.warning(f"⚠️ z_score_exit={z_score_exit}は不正。デフォルト0.5使用")
+            z_score_exit = 0.5
+        if max_pairs < 0 or max_pairs > 100:
+            logger.warning(f"⚠️ max_pairs={max_pairs}は範囲外。デフォルト3使用")
+            max_pairs = 3
+        if position_size_pct <= 0 or position_size_pct > 1.0:
+            logger.warning(f"⚠️ position_size_pct={position_size_pct}は範囲外。デフォルト0.1使用")
+            position_size_pct = 0.1
+
         pair_trading_config = PairTradingConfig(
-            z_score_entry=pt_config.get('z_score_entry', 2.0),
-            z_score_exit=pt_config.get('z_score_exit', 0.5),
+            z_score_entry=z_score_entry,
+            z_score_exit=z_score_exit,
             z_score_stop_loss=pt_config.get('z_score_stop_loss', 4.0),
-            max_pairs=pt_config.get('max_pairs', 3),
-            position_size_pct=pt_config.get('position_size_pct', 0.1),
+            max_pairs=max_pairs,
+            position_size_pct=position_size_pct,
             lookback_period=pt_config.get('lookback_period', 252),
             rebalance_interval=pt_config.get('rebalance_interval', 24),
             min_half_life=pt_config.get('min_half_life', 5.0),
