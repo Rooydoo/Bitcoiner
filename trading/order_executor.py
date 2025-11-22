@@ -137,8 +137,8 @@ class OrderExecutor:
                         commission_rate = 0.0015
                         required_capital = estimated_cost * (1 + commission_rate)
 
-                        # ✨ 1%バッファを追加（価格変動・手数料誤差・並行処理を考慮）
-                        buffer_rate = 0.01  # 1%バッファ
+                        # ✨ 3%バッファを追加（価格変動・手数料誤差・並行処理を考慮）
+                        buffer_rate = 0.03  # 3%バッファ（HIGH-5: 並行負荷下でも安全）
                         required_capital_with_buffer = required_capital * (1 + buffer_rate)
 
                         if required_capital_with_buffer > available_jpy:

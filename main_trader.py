@@ -220,6 +220,7 @@ class CryptoTrader:
 
     def _restore_pair_positions(self):
         """DBからオープン中のペアポジションを復元"""
+        failed_positions = []
         try:
             open_positions = self.db_manager.get_open_pair_positions()
 
@@ -255,15 +256,37 @@ class CryptoTrader:
 
                 except Exception as e:
                     logger.error(f"  ✗ ポジション復元エラー: {pos_data.get('pair_id', 'unknown')} - {e}")
+                    failed_positions.append(pos_data.get('pair_id', 'unknown'))
 
             if restored_count > 0:
                 logger.info(f"  ✓ {restored_count}件のペアポジションを復元しました")
 
+            # ✨ 復元失敗が1件以上ある場合はセーフモードに移行
+            if failed_positions:
+                logger.error(f"  🚨 {len(failed_positions)}件のペアポジション復元に失敗 → セーフモード移行")
+                self.safe_mode = True
+                self.notifier.notify_error(
+                    '起動時ポジション復元失敗',
+                    f'{len(failed_positions)}件のペアポジション復元に失敗しました。\n'
+                    f'失敗ポジション: {", ".join(failed_positions)}\n'
+                    f'セーフモードで起動します（新規エントリー停止）。\n'
+                    f'手動で取引所を確認してください。'
+                )
+
         except Exception as e:
             logger.error(f"ペアポジション復元エラー: {e}")
+            # 復元プロセス全体が失敗した場合もセーフモード
+            self.safe_mode = True
+            self.notifier.notify_error(
+                '起動時ポジション復元失敗',
+                f'ペアポジション復元プロセスが失敗しました。\n'
+                f'エラー: {e}\n'
+                f'セーフモードで起動します。'
+            )
 
     def _restore_regular_positions(self):
         """DBからオープン中の通常ポジションを復元"""
+        failed_positions = []
         try:
             df = self.db_manager.get_open_positions()
 
@@ -325,12 +348,34 @@ class CryptoTrader:
 
                 except Exception as e:
                     logger.error(f"  ✗ ポジション復元エラー: {row.get('position_id', 'unknown')} - {e}")
+                    if row.get('status') == 'open':  # openステータスの復元失敗のみカウント
+                        failed_positions.append(row.get('position_id', 'unknown'))
 
             if restored_count > 0:
                 logger.info(f"  ✓ {restored_count}件の通常ポジションを復元しました")
 
+            # ✨ 復元失敗が1件以上ある場合はセーフモードに移行
+            if failed_positions:
+                logger.error(f"  🚨 {len(failed_positions)}件の通常ポジション復元に失敗 → セーフモード移行")
+                self.safe_mode = True
+                self.notifier.notify_error(
+                    '起動時ポジション復元失敗',
+                    f'{len(failed_positions)}件の通常ポジション復元に失敗しました。\n'
+                    f'失敗ポジション: {", ".join(failed_positions)}\n'
+                    f'セーフモードで起動します（新規エントリー停止）。\n'
+                    f'手動で取引所を確認してください。'
+                )
+
         except Exception as e:
             logger.error(f"通常ポジション復元エラー: {e}")
+            # 復元プロセス全体が失敗した場合もセーフモード
+            self.safe_mode = True
+            self.notifier.notify_error(
+                '起動時ポジション復元失敗',
+                f'通常ポジション復元プロセスが失敗しました。\n'
+                f'エラー: {e}\n'
+                f'セーフモードで起動します。'
+            )
 
     def reconcile_unknown_positions(self):
         """✨ execution_unknown状態のポジションを調整（定期実行）"""
