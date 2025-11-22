@@ -93,6 +93,18 @@ class OrderExecutor:
         Returns:
             注文情報の辞書
         """
+        # 最小注文数量チェック
+        min_amounts = {
+            'BTC/JPY': 0.001,
+            'ETH/JPY': 0.01,
+            'XRP/JPY': 1.0,
+            'FX_BTC_JPY': 0.01  # FXの場合
+        }
+        min_amount = min_amounts.get(symbol, 0.0)
+        if amount < min_amount:
+            logger.error(f"注文数量不足: {symbol} {amount:.8f} < 最小値 {min_amount}")
+            return None
+
         if self.test_mode:
             # テストモード: モック注文を返す
             order = self._create_mock_order(symbol, side, 'market', amount, None)
@@ -280,6 +292,9 @@ class OrderExecutor:
 
         # 手数料を差し引いた購入可能数量
         quantity = (trade_capital * (1 - commission_rate)) / current_price
+
+        # 精度調整（8桁に丸める）
+        quantity = round(quantity, 8)
 
         logger.info(f"ポジションサイズ計算: {quantity:.6f} {symbol.split('/')[0]} "
                    f"(資金: ¥{available_capital:,.0f}, 価格: ¥{current_price:,.0f})")

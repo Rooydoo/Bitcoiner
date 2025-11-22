@@ -889,6 +889,38 @@ class CryptoTrader:
                 logger.info(f"      {position.symbol1}: {position.size1:.6f}")
                 logger.info(f"      {position.symbol2}: {position.size2:.6f}")
 
+                # 残高チェック（空売り防止）
+                symbol1_base = position.symbol1.split('/')[0]  # BTC/JPY -> BTC
+                symbol2_base = position.symbol2.split('/')[0]  # ETH/JPY -> ETH
+
+                balance_ok = True
+
+                if position.direction == 'long_spread':
+                    # symbol1買い、symbol2売り
+                    # symbol2の保有量をチェック
+                    balance2 = self.order_executor.get_balance(symbol2_base)
+                    available2 = balance2.get('free', 0)
+
+                    if available2 < position.size2:
+                        logger.error(f"      ✗ {symbol2_base} 残高不足: 必要{position.size2:.6f}, 保有{available2:.6f}")
+                        balance_ok = False
+                else:
+                    # symbol1売り、symbol2買い
+                    # symbol1の保有量をチェック
+                    balance1 = self.order_executor.get_balance(symbol1_base)
+                    available1 = balance1.get('free', 0)
+
+                    if available1 < position.size1:
+                        logger.error(f"      ✗ {symbol1_base} 残高不足: 必要{position.size1:.6f}, 保有{available1:.6f}")
+                        balance_ok = False
+
+                if not balance_ok:
+                    logger.error(f"      ✗ 残高不足のためペアエントリー中止")
+                    # ポジションを削除
+                    if position.pair_id in self.pair_trading_strategy.positions:
+                        del self.pair_trading_strategy.positions[position.pair_id]
+                    return
+
                 # 実際の注文実行
                 orders_success = True
 
@@ -922,21 +954,35 @@ class CryptoTrader:
                     logger.info(f"      ✓ 両方の注文実行成功")
 
                     # データベースに永続化
-                    self.db_manager.create_pair_position({
-                        'pair_id': position.pair_id,
-                        'symbol1': position.symbol1,
-                        'symbol2': position.symbol2,
-                        'direction': position.direction,
-                        'hedge_ratio': position.hedge_ratio,
-                        'entry_spread': position.entry_spread,
-                        'entry_z_score': position.entry_z_score,
-                        'entry_time': int(position.entry_time.timestamp()),
-                        'size1': position.size1,
-                        'size2': position.size2,
-                        'entry_price1': position.entry_price1,
-                        'entry_price2': position.entry_price2,
-                        'entry_capital': position.entry_capital
-                    })
+                    try:
+                        self.db_manager.create_pair_position({
+                            'pair_id': position.pair_id,
+                            'symbol1': position.symbol1,
+                            'symbol2': position.symbol2,
+                            'direction': position.direction,
+                            'hedge_ratio': position.hedge_ratio,
+                            'entry_spread': position.entry_spread,
+                            'entry_z_score': position.entry_z_score,
+                            'entry_time': int(position.entry_time.timestamp()),
+                            'size1': position.size1,
+                            'size2': position.size2,
+                            'entry_price1': position.entry_price1,
+                            'entry_price2': position.entry_price2,
+                            'entry_capital': position.entry_capital
+                        })
+                    except Exception as db_error:
+                        logger.error(f"      ✗ DB保存失敗: {db_error}")
+                        # メモリからもポジションを削除
+                        if position.pair_id in self.pair_trading_strategy.positions:
+                            del self.pair_trading_strategy.positions[position.pair_id]
+                        # エラー通知
+                        self.notifier.notify_error(
+                            'ペアポジションDB保存失敗',
+                            f'ペア {position.pair_id} のDB保存に失敗しました。\n'
+                            f'注文は実行済みのため、手動で取引所を確認してください。\n'
+                            f'エラー: {db_error}'
+                        )
+                        return
 
                     # Telegram通知
                     self.notifier.notify_pair_trade_open(
@@ -1022,13 +1068,23 @@ class CryptoTrader:
             logger.info(f"      損益: ¥{pnl:,.0f} ({reason})")
 
             # データベースに永続化
-            self.db_manager.close_pair_position(position.pair_id, {
-                'exit_price1': price1,
-                'exit_price2': price2,
-                'exit_time': int(datetime.now().timestamp()),
-                'exit_reason': reason,
-                'realized_pnl': pnl
-            })
+            try:
+                self.db_manager.close_pair_position(position.pair_id, {
+                    'exit_price1': price1,
+                    'exit_price2': price2,
+                    'exit_time': int(datetime.now().timestamp()),
+                    'exit_reason': reason,
+                    'realized_pnl': pnl
+                })
+            except Exception as db_error:
+                logger.error(f"      ✗ DB更新失敗（決済記録）: {db_error}")
+                # 決済自体は成功しているので、エラー通知のみ
+                self.notifier.notify_error(
+                    'ペアポジション決済DB更新失敗',
+                    f'ペア {position.pair_id} の決済記録の保存に失敗しました。\n'
+                    f'決済は正常に完了していますが、DB記録が不完全です。\n'
+                    f'エラー: {db_error}'
+                )
 
             # リスク管理に記録
             initial_capital = self.config.get('trading', {}).get('initial_capital', 200000)
