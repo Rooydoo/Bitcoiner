@@ -56,7 +56,8 @@ from utils.constants import (
     ORDER_STATUS_RETRY_DELAYS,
     ORDER_SUCCESS_STATUSES,
     ORDER_FINAL_STATUSES,
-    MAX_ROLLBACK_RETRIES
+    MAX_ROLLBACK_RETRIES,
+    MAX_CONSECUTIVE_API_ERRORS
 )
 
 # ロガー設定
@@ -2111,7 +2112,6 @@ class CryptoTrader:
         last_health_check = datetime.now()
         cycle_count = 0
         consecutive_api_errors = 0
-        max_consecutive_api_errors = 3
 
         # レポート送信済みフラグ
         sent_reports = {
@@ -2224,10 +2224,10 @@ class CryptoTrader:
 
                     if is_api_error:
                         consecutive_api_errors += 1
-                        logger.error(f"APIエラー発生（{consecutive_api_errors}/{max_consecutive_api_errors}回目）: {cycle_error}")
+                        logger.error(f"APIエラー発生（{consecutive_api_errors}/{MAX_CONSECUTIVE_API_ERRORS}回目）: {cycle_error}")
 
                         # 連続APIエラー制限到達
-                        if consecutive_api_errors >= max_consecutive_api_errors:
+                        if consecutive_api_errors >= MAX_CONSECUTIVE_API_ERRORS:
                             error_msg = (
                                 f"連続APIエラー制限到達（{consecutive_api_errors}回）\n"
                                 f"エラー: {cycle_error}\n"

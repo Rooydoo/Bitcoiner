@@ -31,6 +31,7 @@ POSITION_RECONCILE_CYCLES = 10  # ポジション調整間隔
 
 # ========== API障害ハンドリング ==========
 API_FAILURE_THRESHOLD = 5  # セーフモード発動までのAPI失敗回数
+MAX_CONSECUTIVE_API_ERRORS = 3  # サイクルエラー時の最大連続API失敗回数
 
 # ========== 注文ステータス ==========
 ORDER_SUCCESS_STATUSES = ['closed', 'filled']  # 注文成功とみなすステータス
