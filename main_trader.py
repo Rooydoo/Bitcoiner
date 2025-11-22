@@ -2181,6 +2181,25 @@ def main():
 
     args = parser.parse_args()
 
+    # LOW-2: 本番モード起動時の確認プロンプト
+    if not args.test:
+        logger.warning("=" * 70)
+        logger.warning("⚠️  本番モードで起動しようとしています")
+        logger.warning("   実際の資金で取引が実行されます！")
+        logger.warning("=" * 70)
+
+        # ユーザー確認
+        try:
+            confirmation = input("本番モードで続行しますか？ (yes/no): ").strip().lower()
+            if confirmation not in ['yes', 'y']:
+                logger.info("起動をキャンセルしました")
+                return
+        except (KeyboardInterrupt, EOFError):
+            logger.info("\n起動をキャンセルしました")
+            return
+
+        logger.info("本番モードで起動を続行します...")
+
     # トレーダー起動
     trader = CryptoTrader(
         config_path=args.config,

@@ -449,15 +449,15 @@ class SQLiteManager:
         data = data[columns_order]
 
         try:
-            # 重複を無視して挿入（OR IGNORE）
-            for _, row in data.iterrows():
-                conn.execute("""
-                    INSERT OR IGNORE INTO ohlcv (symbol, timeframe, timestamp, open, high, low, close, volume)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, tuple(row))
+            # LOW-1: バッチ挿入で効率化（executemanyを使用）
+            cursor = conn.cursor()
+            cursor.executemany("""
+                INSERT OR IGNORE INTO ohlcv (symbol, timeframe, timestamp, open, high, low, close, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, data.to_numpy().tolist())
 
             conn.commit()
-            logger.debug(f"OHLCV挿入完了: {symbol} {timeframe} ({len(data)}件)")
+            logger.debug(f"OHLCV挿入完了: {symbol} {timeframe} ({len(data)}件、バッチ処理)")
         except Exception as e:
             logger.error(f"OHLCV挿入エラー: {e}")
             conn.rollback()
