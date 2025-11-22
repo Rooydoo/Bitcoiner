@@ -154,6 +154,13 @@ class PositionManager:
             logger.error(f"{symbol}の既存ポジションがあります。先に既存ポジションを決済してください。")
             return None
 
+        # ショートポジション検証: bitFlyer現物市場では空売り不可
+        # FX_BTC_JPY以外でショートを試みた場合はエラー
+        if side == 'short' and not symbol.startswith('FX_'):
+            logger.error(f"現物市場 {symbol} ではショートポジションは取引できません。"
+                        f"ショートポジションはFX_BTC_JPYのみ対応しています。")
+            return None
+
         position = Position(symbol, side, entry_price, quantity)
         self.open_positions[symbol] = position
 
@@ -174,6 +181,132 @@ class PositionManager:
                    f"{quantity:.6f} @ ¥{entry_price:,.0f}")
 
         return position
+
+    def create_pending_position(
+        self,
+        symbol: str,
+        side: str,
+        entry_price: float,
+        quantity: float
+    ) -> Optional[Position]:
+        """
+        保留中ポジションを作成（注文実行前にDB記録）
+
+        Args:
+            symbol: 取引ペア
+            side: 'long' または 'short'
+            entry_price: エントリー予定価格
+            quantity: 数量
+
+        Returns:
+            Positionインスタンス（status='pending_execution'）
+        """
+        # 既存のポジション確認
+        if symbol in self.open_positions:
+            logger.error(f"{symbol}の既存ポジションがあります。")
+            return None
+
+        # ショートポジション検証
+        if side == 'short' and not symbol.startswith('FX_'):
+            logger.error(f"現物市場 {symbol} ではショートポジション不可")
+            return None
+
+        position = Position(symbol, side, entry_price, quantity)
+        position.status = 'pending_execution'  # 保留ステータス
+
+        # DBに保留レコード作成
+        if self.db_manager:
+            position_data = {
+                'position_id': position.position_id,
+                'symbol': symbol,
+                'side': side,
+                'entry_price': entry_price,
+                'entry_amount': quantity,
+                'entry_time': position.entry_time.isoformat(),
+                'status': 'pending_execution'
+            }
+            self.db_manager.create_position(position_data)
+
+        logger.info(f"保留ポジション作成: {symbol} {side.upper()} "
+                   f"{quantity:.6f} @ ¥{entry_price:,.0f} (ID: {position.position_id})")
+
+        return position
+
+    def confirm_pending_position(
+        self,
+        position: Position,
+        actual_price: float
+    ) -> bool:
+        """
+        保留ポジションを確定（注文実行成功後）
+
+        Args:
+            position: 保留中のポジション
+            actual_price: 実際の約定価格
+
+        Returns:
+            成功したかどうか
+        """
+        if position.status != 'pending_execution':
+            logger.error(f"ポジション {position.position_id} は保留状態ではありません")
+            return False
+
+        # ステータスを確定
+        position.status = 'open'
+        position.entry_price = actual_price  # 実際の約定価格で更新
+
+        # メモリに登録
+        self.open_positions[position.symbol] = position
+
+        # DB更新
+        if self.db_manager:
+            self.db_manager.update_position(
+                position.position_id,
+                {
+                    'status': 'open',
+                    'entry_price': actual_price
+                }
+            )
+
+        logger.info(f"ポジション確定: {position.symbol} {position.side.upper()} "
+                   f"@ ¥{actual_price:,.0f} (ID: {position.position_id})")
+
+        return True
+
+    def cancel_pending_position(
+        self,
+        position: Position,
+        reason: str = "注文失敗"
+    ) -> bool:
+        """
+        保留ポジションをキャンセル（注文実行失敗時）
+
+        Args:
+            position: 保留中のポジション
+            reason: キャンセル理由
+
+        Returns:
+            成功したかどうか
+        """
+        if position.status != 'pending_execution':
+            logger.warning(f"ポジション {position.position_id} は保留状態ではありません")
+
+        # ステータスをキャンセルに
+        position.status = 'execution_failed'
+
+        # DB更新
+        if self.db_manager:
+            self.db_manager.update_position(
+                position.position_id,
+                {
+                    'status': 'execution_failed'
+                }
+            )
+
+        logger.warning(f"ポジションキャンセル: {position.symbol} - 理由: {reason} "
+                      f"(ID: {position.position_id})")
+
+        return True
 
     def partial_close_position(
         self,
@@ -206,17 +339,28 @@ class PositionManager:
         partial_quantity = position.quantity * close_ratio
         remaining_quantity = position.quantity * (1.0 - close_ratio)
 
-        # 部分決済のPNL計算
+        # 部分決済のPNL計算（手数料考慮）
+        commission_rate = 0.0015  # bitFlyer手数料 0.15%
+
         if position.side == 'long':
             partial_pnl = (exit_price - position.entry_price) * partial_quantity
         else:  # short
             partial_pnl = (position.entry_price - exit_price) * partial_quantity
 
-        partial_pnl_pct = (partial_pnl / (position.entry_price * partial_quantity)) * 100 if partial_quantity > 0 else 0.0
+        # 手数料控除
+        # エントリー時手数料（部分比率分）
+        entry_fee = position.entry_price * partial_quantity * commission_rate
+        # 決済時手数料
+        exit_fee = exit_price * partial_quantity * commission_rate
+
+        # 手数料控除後の実質PnL
+        partial_pnl_after_fees = partial_pnl - entry_fee - exit_fee
+
+        partial_pnl_pct = (partial_pnl_after_fees / (position.entry_price * partial_quantity)) * 100 if partial_quantity > 0 else 0.0
 
         logger.info(f"ポジション部分決済: {symbol} {position.side.upper()} "
                    f"{close_ratio:.0%} ({partial_quantity:.6f} / {position.quantity:.6f}) "
-                   f"損益=¥{partial_pnl:,.0f} ({partial_pnl_pct:+.2f}%)")
+                   f"損益=¥{partial_pnl_after_fees:,.0f} ({partial_pnl_pct:+.2f}%)")
 
         # DBにトレード履歴を記録
         if self.db_manager:
@@ -227,9 +371,9 @@ class PositionManager:
                 'price': exit_price,
                 'amount': partial_quantity,
                 'cost': exit_price * partial_quantity,
-                'fee': exit_price * partial_quantity * 0.0015,
+                'fee': entry_fee + exit_fee,  # 総手数料
                 'order_type': 'market',
-                'pnl': partial_pnl,
+                'pnl': partial_pnl_after_fees,  # 手数料控除後
                 'timestamp': datetime.now().isoformat()
             }
             self.db_manager.insert_trade(trade_data)
@@ -249,9 +393,11 @@ class PositionManager:
             'partial_quantity': partial_quantity,
             'remaining_quantity': remaining_quantity,
             'close_ratio': close_ratio,
-            'partial_pnl': partial_pnl,
+            'partial_pnl': partial_pnl_after_fees,  # 手数料控除後
             'partial_pnl_pct': partial_pnl_pct,
-            'exit_price': exit_price
+            'exit_price': exit_price,
+            'entry_fee': entry_fee,
+            'exit_fee': exit_fee
         }
 
         return partial_close_info
@@ -292,15 +438,18 @@ class PositionManager:
 
             # トレード履歴にも記録
             from datetime import datetime
+            commission_rate = 0.0015
+            entry_fee = position.entry_price * position.quantity * commission_rate
+            exit_fee = exit_price * position.quantity * commission_rate
             trade_data = {
                 'symbol': symbol,
                 'side': position.side,
                 'price': exit_price,
                 'amount': position.quantity,
                 'cost': exit_price * position.quantity,
-                'fee': exit_price * position.quantity * 0.0015,
+                'fee': entry_fee + exit_fee,  # 総手数料（エントリー+決済）
                 'order_type': 'market',
-                'pnl': position.realized_pnl,
+                'pnl': position.realized_pnl,  # 既に手数料控除済み
                 'timestamp': datetime.now().isoformat()
             }
             self.db_manager.insert_trade(trade_data)

@@ -63,6 +63,9 @@ class CryptoTrader:
             test_mode: テストモード（APIキーなしで動作）
         """
         self.test_mode = test_mode
+        self.safe_mode = False  # API障害時の安全モード
+        self.api_failure_count = 0  # API失敗回数カウンター
+        self.api_failure_threshold = 5  # 5回連続失敗でセーフモード
         logger.info("=" * 70)
         logger.info("CryptoTrader 起動中...")
         logger.info(f"モード: {'テスト' if test_mode else '本番'}")
@@ -109,7 +112,9 @@ class CryptoTrader:
         self.order_executor = OrderExecutor(test_mode=test_mode)
         self.position_manager = PositionManager(self.db_manager)
 
-        risk_config = self.config.get('risk_management', {})
+        # 設定値の安全性強制（危険な値を安全な範囲に修正）
+        risk_config = self._enforce_safe_config(self.config.get('risk_management', {}))
+
         self.risk_manager = RiskManager(
             max_position_size=risk_config.get('max_position_size', 0.95),
             stop_loss_pct=risk_config.get('stop_loss_pct', 10.0),
@@ -586,6 +591,134 @@ class CryptoTrader:
             logger.error(f"残高取得エラー: {e}")
             return 0.0
 
+    def _handle_api_failure(self, operation: str = "API操作"):
+        """
+        API失敗時の処理
+
+        Args:
+            operation: 失敗した操作名
+        """
+        self.api_failure_count += 1
+        logger.warning(f"⚠️  API失敗: {operation} ({self.api_failure_count}/{self.api_failure_threshold}回)")
+
+        if self.api_failure_count >= self.api_failure_threshold and not self.safe_mode:
+            self.safe_mode = True
+            logger.error("=" * 70)
+            logger.error("🚨 セーフモード発動: API障害を検出しました")
+            logger.error(f"   連続{self.api_failure_count}回のAPI失敗")
+            logger.error("   → 新規ポジションエントリーを停止します")
+            logger.error("   → 既存ポジションの決済のみ許可します")
+            logger.error("=" * 70)
+
+            # Telegram通知
+            if hasattr(self, 'notifier'):
+                try:
+                    self.notifier.send_message(
+                        "🚨 *セーフモード発動*\n\n"
+                        f"API障害を検出しました（連続{self.api_failure_count}回失敗）\n"
+                        "新規エントリーを停止し、既存ポジションの決済のみ許可します。"
+                    )
+                except Exception as e:
+                    logger.error(f"Telegram通知失敗: {e}")
+
+    def _handle_api_success(self):
+        """API成功時の処理（カウンターリセット）"""
+        if self.api_failure_count > 0:
+            logger.info(f"✓ API復旧: 失敗カウンターをリセット（{self.api_failure_count} → 0）")
+            self.api_failure_count = 0
+
+        if self.safe_mode:
+            self.safe_mode = False
+            logger.info("=" * 70)
+            logger.info("✅ セーフモード解除: API接続が回復しました")
+            logger.info("   → 通常取引を再開します")
+            logger.info("=" * 70)
+
+            # Telegram通知
+            if hasattr(self, 'notifier'):
+                try:
+                    self.notifier.send_message(
+                        "✅ *セーフモード解除*\n\n"
+                        "API接続が回復しました。\n"
+                        "通常取引を再開します。"
+                    )
+                except Exception as e:
+                    logger.error(f"Telegram通知失敗: {e}")
+
+    def _enforce_safe_config(self, config: dict) -> dict:
+        """
+        設定値を安全な範囲に強制
+
+        Args:
+            config: 設定値の辞書
+
+        Returns:
+            安全な範囲に修正された設定値
+        """
+        safe_config = config.copy()
+        modified = []
+
+        # max_position_size: 0.1 ~ 0.95 に制限
+        if 'max_position_size' in safe_config:
+            original = safe_config['max_position_size']
+            safe_config['max_position_size'] = max(0.1, min(0.95, original))
+            if safe_config['max_position_size'] != original:
+                modified.append(f"max_position_size: {original} → {safe_config['max_position_size']}")
+
+        # stop_loss_pct: 1.0 ~ 50.0% に制限
+        if 'stop_loss_pct' in safe_config:
+            original = safe_config['stop_loss_pct']
+            safe_config['stop_loss_pct'] = max(1.0, min(50.0, original))
+            if safe_config['stop_loss_pct'] != original:
+                modified.append(f"stop_loss_pct: {original}% → {safe_config['stop_loss_pct']}%")
+
+        # max_drawdown_pct: 5.0 ~ 50.0% に制限
+        if 'max_drawdown_pct' in safe_config:
+            original = safe_config['max_drawdown_pct']
+            safe_config['max_drawdown_pct'] = max(5.0, min(50.0, original))
+            if safe_config['max_drawdown_pct'] != original:
+                modified.append(f"max_drawdown_pct: {original}% → {safe_config['max_drawdown_pct']}%")
+
+        # 損失制限: 0.1 ~ 50.0% に制限
+        for key in ['max_daily_loss_pct', 'max_weekly_loss_pct', 'max_monthly_loss_pct']:
+            if key in safe_config:
+                original = safe_config[key]
+                safe_config[key] = max(0.1, min(50.0, original))
+                if safe_config[key] != original:
+                    modified.append(f"{key}: {original}% → {safe_config[key]}%")
+
+        # take_profit: 1.0 ~ 200.0% に制限
+        for key in ['take_profit_first', 'take_profit_second']:
+            if key in safe_config:
+                original = safe_config[key]
+                safe_config[key] = max(1.0, min(200.0, original))
+                if safe_config[key] != original:
+                    modified.append(f"{key}: {original}% → {safe_config[key]}%")
+
+        # consecutive_loss_limit: 1 ~ 20 に制限
+        if 'consecutive_loss_limit' in safe_config:
+            original = safe_config['consecutive_loss_limit']
+            safe_config['consecutive_loss_limit'] = max(1, min(20, int(original)))
+            if safe_config['consecutive_loss_limit'] != original:
+                modified.append(f"consecutive_loss_limit: {original} → {safe_config['consecutive_loss_limit']}")
+
+        # max_positions: 1 ~ 10 に制限
+        if 'max_positions' in safe_config:
+            original = safe_config['max_positions']
+            safe_config['max_positions'] = max(1, min(10, int(original)))
+            if safe_config['max_positions'] != original:
+                modified.append(f"max_positions: {original} → {safe_config['max_positions']}")
+
+        # 修正があった場合は警告
+        if modified:
+            logger.warning("=" * 70)
+            logger.warning("⚠️  設定値が危険な範囲にあったため、安全な値に修正しました:")
+            for mod in modified:
+                logger.warning(f"   • {mod}")
+            logger.warning("=" * 70)
+
+        return safe_config
+
     def _enter_new_position(self, symbol: str, side: str, current_price: float, signal: Dict, strategy_type: str = 'trend'):
         """新規ポジションエントリー
 
@@ -597,6 +730,11 @@ class CryptoTrader:
             strategy_type: 戦略タイプ（'trend' or 'cointegration'）
         """
         try:
+            # セーフモードチェック
+            if self.safe_mode:
+                logger.warning(f"  🚨 {symbol} エントリー拒否: セーフモード中（新規エントリー停止）")
+                return
+
             # ポジション数制限チェック
             max_positions = self.config.get('risk_management', {}).get('max_positions', 2)
             current_positions = len(self.position_manager.get_all_positions())
@@ -640,25 +778,56 @@ class CryptoTrader:
                 logger.warning(f"  {symbol} ポジションサイズ不足")
                 return
 
-            # 注文実行
+            # 注文実行（二段階コミット）
             logger.info(f"  → 新規エントリー: {side.upper()} {quantity:.6f} {symbol} @ ¥{current_price:,.0f}")
 
-            order = self.order_executor.create_market_order(
-                symbol,
-                'buy' if side == 'long' else 'sell',
-                quantity
+            pending_position = None  # 例外ハンドリング用に初期化
+
+            # 1. 保留ポジション作成（DB記録）
+            pending_position = self.position_manager.create_pending_position(
+                symbol=symbol,
+                side=side,
+                entry_price=current_price,
+                quantity=quantity
             )
 
-            if order and order['status'] in ['closed', 'filled']:
-                # ポジション登録
-                position = self.position_manager.open_position(
-                    symbol=symbol,
-                    side=side,
-                    entry_price=current_price,
-                    quantity=quantity
+            if not pending_position:
+                logger.error(f"  ✗ 保留ポジション作成失敗: {symbol}")
+                return
+
+            # 2. 注文実行（API障害検出機能付き）
+            try:
+                order = self.order_executor.create_market_order(
+                    symbol,
+                    'buy' if side == 'long' else 'sell',
+                    quantity
                 )
 
-                logger.info(f"  ✓ エントリー成功: ポジションID={position.position_id}")
+                # API成功
+                self._handle_api_success()
+
+            except Exception as api_error:
+                # API障害検出
+                self._handle_api_failure(operation=f"{symbol} 注文実行")
+                self.position_manager.cancel_pending_position(
+                    pending_position,
+                    reason=f"API障害: {str(api_error)}"
+                )
+                logger.error(f"  ✗ API障害により注文失敗: {api_error}")
+                return
+
+            # 3. 注文結果に応じて確定またはキャンセル
+            if order and order['status'] in ['closed', 'filled']:
+                # 実際の約定価格を取得（ない場合は予定価格を使用）
+                actual_price = order.get('price', current_price)
+
+                # ポジション確定
+                if self.position_manager.confirm_pending_position(pending_position, actual_price):
+                    logger.info(f"  ✓ エントリー成功: ポジションID={pending_position.position_id}")
+                    position = pending_position
+                else:
+                    logger.error(f"  ✗ ポジション確定失敗")
+                    return
 
                 # Telegram通知
                 self.notifier.notify_trade_open(
@@ -668,9 +837,21 @@ class CryptoTrader:
                     quantity
                 )
             else:
+                # 注文失敗時は保留ポジションをキャンセル
+                self.position_manager.cancel_pending_position(
+                    pending_position,
+                    reason=f"注文失敗: {order.get('status', 'unknown') if order else 'no_order'}"
+                )
+                # API自体は成功したが注文が約定しなかった（これはAPI障害ではない）
                 logger.error(f"  ✗ 注文失敗: {order}")
 
         except Exception as e:
+            # 例外発生時も保留ポジションをキャンセル
+            if pending_position and pending_position.status == 'pending_execution':
+                self.position_manager.cancel_pending_position(
+                    pending_position,
+                    reason=f"例外発生: {str(e)}"
+                )
             logger.error(f"{symbol} エントリーエラー: {e}")
             logger.error(traceback.format_exc())
 
