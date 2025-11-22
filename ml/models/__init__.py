@@ -1,4 +1,4 @@
-"""_°fÒâÇëâ¸åüë"""
+"""æ©Ÿæ¢°å­¦ç¿’ãƒ¢ãƒ‡ãƒ«ãƒ¢ã‚¸ãƒ¥ãƒ¼ãƒ«"""
 
 from ml.models.cointegration_analyzer import (
     CointegrationAnalyzer,

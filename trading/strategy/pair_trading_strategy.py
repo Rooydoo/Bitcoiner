@@ -166,6 +166,11 @@ class PairTradingStrategy:
         # 資金の一定割合を使用
         pair_capital = capital * self.config.position_size_pct
 
+        # 価格のゼロチェック
+        if price1 <= 0 or price2 <= 0:
+            logger.error(f"価格が無効です: price1={price1}, price2={price2}")
+            return 0.0, 0.0
+
         # 資産1のサイズ
         size1 = pair_capital / price1
 
@@ -271,8 +276,9 @@ class PairTradingStrategy:
         pair_id = f"{pair.symbol1}_{pair.symbol2}"
         size1, size2 = self.calculate_position_sizes(pair, capital, price1, price2)
 
-        # 投入資金を計算
-        entry_capital = size1 * price1 + size2 * price2
+        # 投入資金を計算（ペアトレードでは片側のポジション価値を基準とする）
+        # ドルニュートラルなヘッジなので、実質的な必要資金は片側の価値
+        entry_capital = size1 * price1
 
         position = PairPosition(
             pair_id=pair_id,

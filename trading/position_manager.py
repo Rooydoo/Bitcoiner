@@ -140,10 +140,10 @@ class PositionManager:
         Returns:
             Positionインスタンス
         """
-        # 既存のポジションがある場合は警告
+        # 既存のポジションがある場合はエラー
         if symbol in self.open_positions:
-            logger.warning(f"{symbol}の既存ポジションがあります - 上書きします")
-            self.close_position(symbol, entry_price)
+            logger.error(f"{symbol}の既存ポジションがあります。先に既存ポジションを決済してください。")
+            return None
 
         position = Position(symbol, side, entry_price, quantity)
         self.open_positions[symbol] = position

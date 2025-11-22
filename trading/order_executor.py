@@ -287,6 +287,12 @@ class OrderExecutor:
             購入可能数量
         """
         current_price = self.get_current_price(symbol)
+
+        # 価格の有効性をチェック
+        if not current_price or current_price <= 0:
+            logger.error(f"価格取得失敗または無効な価格: {symbol} = {current_price}")
+            return 0.0
+
         trade_capital = available_capital * position_ratio
         commission_rate = 0.0015  # bitFlyer手数料
 

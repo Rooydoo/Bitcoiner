@@ -1,4 +1,4 @@
-"""ÈìüÇ£ó°&eâ¸åüë"""
+"""å–å¼•æˆ¦ç•¥ãƒ¢ã‚¸ãƒ¥ãƒ¼ãƒ«"""
 
 from trading.strategy.pair_trading_strategy import (
     PairTradingStrategy,

@@ -1277,8 +1277,12 @@ class CryptoTrader:
             logger.info(f"  設定上の初期資本: ¥{initial_capital:,.0f}")
             logger.info(f"  実際の取引所残高: ¥{total_balance:,.0f}")
 
-            # 差異を計算
-            difference_pct = abs(total_balance - initial_capital) / initial_capital * 100
+            # 差異を計算（ゼロ除算を防ぐ）
+            if initial_capital > 0:
+                difference_pct = abs(total_balance - initial_capital) / initial_capital * 100
+            else:
+                logger.error("  ✗ initial_capitalが0または未設定です")
+                return
 
             if difference_pct > 10:
                 logger.warning(f"  ⚠ 警告: 設定値と実残高に{difference_pct:.1f}%の差異があります")
