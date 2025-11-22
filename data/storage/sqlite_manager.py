@@ -2,6 +2,7 @@
 
 import sqlite3
 import logging
+import os
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -98,6 +99,12 @@ class SQLiteManager:
         conn.commit()
         conn.close()
         logger.info(f"価格データベース初期化: {self.price_db}")
+
+        # データベースファイルの権限を制限（オーナーのみ読み書き）
+        try:
+            os.chmod(self.price_db, 0o600)
+        except (OSError, FileNotFoundError):
+            pass  # Windows環境では無視
 
     def _init_trades_db(self):
         """取引データベースの初期化"""
@@ -206,6 +213,12 @@ class SQLiteManager:
         conn.close()
         logger.info(f"取引データベース初期化: {self.trades_db}")
 
+        # データベースファイルの権限を制限（オーナーのみ読み書き）
+        try:
+            os.chmod(self.trades_db, 0o600)
+        except (OSError, FileNotFoundError):
+            pass  # Windows環境では無視
+
     def _init_ml_models_db(self):
         """MLモデルデータベースの初期化"""
         conn = sqlite3.connect(self.ml_models_db)
@@ -272,6 +285,12 @@ class SQLiteManager:
         conn.commit()
         conn.close()
         logger.info(f"MLモデルデータベース初期化: {self.ml_models_db}")
+
+        # データベースファイルの権限を制限（オーナーのみ読み書き）
+        try:
+            os.chmod(self.ml_models_db, 0o600)
+        except (OSError, FileNotFoundError):
+            pass  # Windows環境では無視
 
     # ========== データ挿入メソッド ==========
 

@@ -44,22 +44,31 @@ class Position:
         self.realized_pnl = 0.0
         self.status = 'open'  # 'open', 'closed'
 
-    def calculate_unrealized_pnl(self, current_price: float) -> float:
+    def calculate_unrealized_pnl(self, current_price: float, commission_rate: float = 0.0015) -> float:
         """
-        未実現損益を計算
+        未実現損益を計算（手数料考慮）
 
         Args:
             current_price: 現在価格
+            commission_rate: 取引手数料率（デフォルト: 0.15%）
 
         Returns:
-            未実現損益
+            未実現損益（手数料控除後）
         """
         if self.side == 'long':
             pnl = (current_price - self.entry_price) * self.quantity
         else:  # short
             pnl = (self.entry_price - current_price) * self.quantity
 
-        return pnl
+        # エントリー時手数料（既に支払い済み）
+        entry_fee = self.entry_price * self.quantity * commission_rate
+        # 決済時手数料（未払い、見込み）
+        exit_fee = current_price * self.quantity * commission_rate
+
+        # 手数料を差し引いた実質PnL
+        pnl_after_fees = pnl - entry_fee - exit_fee
+
+        return pnl_after_fees
 
     def calculate_unrealized_pnl_pct(self, current_price: float) -> float:
         """
