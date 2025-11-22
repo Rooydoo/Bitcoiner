@@ -362,7 +362,10 @@ class PositionManager:
         # 手数料控除後の実質PnL
         partial_pnl_after_fees = partial_pnl - entry_fee - exit_fee
 
-        partial_pnl_pct = (partial_pnl_after_fees / (position.entry_price * partial_quantity)) * 100 if partial_quantity > 0 else 0.0
+        # HIGH-1: Float比較にepsilon使用（ゼロ除算回避）
+        epsilon = 1e-10
+        cost_basis = position.entry_price * partial_quantity
+        partial_pnl_pct = (partial_pnl_after_fees / cost_basis) * 100 if cost_basis > epsilon else 0.0
 
         logger.info(f"ポジション部分決済: {symbol} {position.side.upper()} "
                    f"{close_ratio:.0%} ({partial_quantity:.6f} / {position.quantity:.6f}) "
@@ -386,8 +389,8 @@ class PositionManager:
             }
 
             # トランザクション開始
-            # HIGH-6: 外部キー制約有効化のため、db_manager経由で接続
-            conn = self.db_manager._connect_with_wal(self.db_manager.trades_db)
+            # CRITICAL-2: 公開メソッド経由で接続取得
+            conn = self.db_manager.get_connection(self.db_manager.trades_db)
             try:
                 conn.execute("BEGIN IMMEDIATE")
 

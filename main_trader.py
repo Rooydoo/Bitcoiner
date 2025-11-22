@@ -807,7 +807,9 @@ class CryptoTrader:
         """
         # MEDIUM-5: API失敗カウンターをスレッドセーフに更新
         with self.api_failure_lock:
-            self.api_failure_count += 1
+            # CRITICAL-7: カウンター上限設定（無制限増加防止）
+            if self.api_failure_count < 9999:
+                self.api_failure_count += 1
             current_count = self.api_failure_count
 
         logger.warning(f"⚠️  API失敗: {operation} ({current_count}/{self.api_failure_threshold}回)")

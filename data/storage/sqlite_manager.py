@@ -467,6 +467,18 @@ class SQLiteManager:
         finally:
             # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
 
+    def get_connection(self, db_path):
+        """
+        CRITICAL-2: データベース接続を取得（公開メソッド）
+
+        Args:
+            db_path: データベースファイルパス
+
+        Returns:
+            sqlite3.Connection
+        """
+        return self._connect_with_wal(db_path)
+
     def insert_trade(self, trade_data: Dict[str, Any]) -> int:
         """
         取引を挿入
