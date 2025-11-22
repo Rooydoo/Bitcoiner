@@ -16,6 +16,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # リトライ機能インポート
 from utils.retry import retry_on_network_error
+# HIGH-2: 定数をインポート
+from utils.constants import (
+    BITFLYER_COMMISSION_RATE,
+    MAX_ORDER_COST_JPY,
+    BALANCE_BUFFER_RATE,
+    ORDER_STATUS_RETRY_DELAYS
+)
 
 logger = logging.getLogger(__name__)
 
@@ -188,12 +195,13 @@ class OrderExecutor:
                     try:
                         balance = self.get_balance('JPY')
                         available_jpy = balance.get('free', 0)
-                        commission_rate = 0.0015
+                        # HIGH-2: 定数を使用
+                        commission_rate = BITFLYER_COMMISSION_RATE
                         # MEDIUM-3: 必要資本を丸める
                         required_capital = self.round_cost(estimated_cost * (1 + commission_rate), "JPY")
 
                         # ✨ 3%バッファを追加（価格変動・手数料誤差・並行処理を考慮）
-                        buffer_rate = 0.03  # 3%バッファ（HIGH-5: 並行負荷下でも安全）
+                        buffer_rate = BALANCE_BUFFER_RATE  # HIGH-2: 定数を使用
                         required_capital_with_buffer = self.round_cost(required_capital * (1 + buffer_rate), "JPY")
 
                         if required_capital_with_buffer > available_jpy:
@@ -395,7 +403,8 @@ class OrderExecutor:
             return 0.0
 
         trade_capital = available_capital * position_ratio
-        commission_rate = 0.0015  # bitFlyer手数料
+        # HIGH-2: 定数を使用
+        commission_rate = BITFLYER_COMMISSION_RATE
 
         # 手数料を考慮した購入可能数量
         # 正しい計算: quantity * price * (1 + commission) <= capital
@@ -436,7 +445,8 @@ class OrderExecutor:
             'cost': self.round_cost(amount * (price or self.get_current_price(symbol)), 'JPY'),
             'fee': {
                 'currency': 'JPY',
-                'cost': self.round_cost(amount * (price or self.get_current_price(symbol)) * 0.0015, 'JPY')
+                # HIGH-2: 定数を使用
+                'cost': self.round_cost(amount * (price or self.get_current_price(symbol)) * BITFLYER_COMMISSION_RATE, 'JPY')
             }
         }
 
