@@ -137,8 +137,12 @@ class OrderExecutor:
                         commission_rate = 0.0015
                         required_capital = estimated_cost * (1 + commission_rate)
 
-                        if required_capital > available_jpy:
-                            logger.error(f"残高不足: 必要¥{required_capital:,.0f} > 利用可能¥{available_jpy:,.0f}")
+                        # ✨ 1%バッファを追加（価格変動・手数料誤差・並行処理を考慮）
+                        buffer_rate = 0.01  # 1%バッファ
+                        required_capital_with_buffer = required_capital * (1 + buffer_rate)
+
+                        if required_capital_with_buffer > available_jpy:
+                            logger.error(f"残高不足: 必要¥{required_capital:,.0f} (+バッファ¥{required_capital*buffer_rate:,.0f}) > 利用可能¥{available_jpy:,.0f}")
                             logger.error(f"  → {symbol} {amount:.8f} @ ¥{estimated_price:,.0f}")
                             return None
                     except Exception as balance_error:

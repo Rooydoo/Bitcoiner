@@ -6,6 +6,7 @@ Phase 1-4の全機能を統合したメイントレーディングシステム
 import sys
 import time
 import traceback
+import threading
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Optional
@@ -183,6 +184,12 @@ class CryptoTrader:
         self.is_running = False
         self.last_prediction_time = {}
         self.models_loaded = False
+
+        # ✨ 並行処理ロック（競合状態を防止）
+        self.order_lock = threading.Lock()  # 注文実行の排他制御
+        self.position_lock = threading.Lock()  # ポジション操作の排他制御
+        self.balance_lock = threading.Lock()  # 残高チェックの排他制御
+        logger.info("  ✓ 並行処理ロック機構を初期化")
 
         logger.info("\n" + "=" * 70)
         logger.info("CryptoTrader 初期化完了")
@@ -816,107 +823,199 @@ class CryptoTrader:
                 logger.info(f"  {symbol} エントリー見送り: 最大ポジション数到達（{current_positions}/{max_positions}）")
                 return
 
-            # 資産情報取得（戦略配分を考慮）
-            available_capital = self._get_available_capital(strategy_type)
+            # ✨ 並行処理ロック取得: 残高チェック〜注文実行を排他制御
+            with self.order_lock:
+                # 資産情報取得（戦略配分を考慮）
+                available_capital = self._get_available_capital(strategy_type)
 
-            if available_capital <= 0:
-                logger.warning(f"  {symbol} エントリー見送り: 利用可能資金なし")
-                return
-
-            # エントリー可否チェック
-            should_enter, reason = self.risk_manager.should_enter_trade(
-                signal_confidence=signal['confidence'],
-                min_confidence=self.config.get('trading', {}).get('min_confidence', 0.6),
-                current_equity=available_capital,
-                initial_capital=self.config.get('trading', {}).get('initial_capital', 200000)
-            )
-
-            if not should_enter:
-                logger.info(f"  {symbol} エントリー見送り: {reason}")
-                return
-
-            # ポジションサイズ計算
-            pair_config = next((p for p in self.trading_pairs if p['symbol'] == symbol), None)
-            allocation = pair_config['allocation'] if pair_config else 0.5
-
-            # 利用可能資本の割り当て（アロケーション × ポジションサイズ上限）
-            position_capital = available_capital * allocation
-            quantity = self.order_executor.calculate_position_size(
-                symbol,
-                position_capital,
-                position_ratio=self.risk_manager.max_position_size
-            )
-
-            if quantity <= 0:
-                logger.warning(f"  {symbol} ポジションサイズ不足")
-                return
-
-            # 注文実行（二段階コミット）
-            logger.info(f"  → 新規エントリー: {side.upper()} {quantity:.6f} {symbol} @ ¥{current_price:,.0f}")
-
-            pending_position = None  # 例外ハンドリング用に初期化
-
-            # 1. 保留ポジション作成（DB記録）
-            pending_position = self.position_manager.create_pending_position(
-                symbol=symbol,
-                side=side,
-                entry_price=current_price,
-                quantity=quantity
-            )
-
-            if not pending_position:
-                logger.error(f"  ✗ 保留ポジション作成失敗: {symbol}")
-                return
-
-            # 2. 注文実行（API障害検出機能付き）
-            try:
-                order = self.order_executor.create_market_order(
-                    symbol,
-                    'buy' if side == 'long' else 'sell',
-                    quantity
-                )
-
-                # API成功
-                self._handle_api_success()
-
-            except Exception as api_error:
-                # API障害検出
-                self._handle_api_failure(operation=f"{symbol} 注文実行")
-                self.position_manager.cancel_pending_position(
-                    pending_position,
-                    reason=f"API障害: {str(api_error)}"
-                )
-                logger.error(f"  ✗ API障害により注文失敗: {api_error}")
-                return
-
-            # 3. 注文結果に応じて確定またはキャンセル
-            if order and order['status'] in ['closed', 'filled']:
-                # 実際の約定価格を取得（ない場合は予定価格を使用）
-                actual_price = order.get('price', current_price)
-
-                # ポジション確定
-                if self.position_manager.confirm_pending_position(pending_position, actual_price):
-                    logger.info(f"  ✓ エントリー成功: ポジションID={pending_position.position_id}")
-                    position = pending_position
-                else:
-                    logger.error(f"  ✗ ポジション確定失敗")
+                if available_capital <= 0:
+                    logger.warning(f"  {symbol} エントリー見送り: 利用可能資金なし")
                     return
 
-                # Telegram通知
-                self.notifier.notify_trade_open(
+                # エントリー可否チェック
+                should_enter, reason = self.risk_manager.should_enter_trade(
+                    signal_confidence=signal['confidence'],
+                    min_confidence=self.config.get('trading', {}).get('min_confidence', 0.6),
+                    current_equity=available_capital,
+                    initial_capital=self.config.get('trading', {}).get('initial_capital', 200000)
+                )
+
+                if not should_enter:
+                    logger.info(f"  {symbol} エントリー見送り: {reason}")
+                    return
+
+                # ポジションサイズ計算
+                pair_config = next((p for p in self.trading_pairs if p['symbol'] == symbol), None)
+                allocation = pair_config['allocation'] if pair_config else 0.5
+
+                # 利用可能資本の割り当て（アロケーション × ポジションサイズ上限）
+                position_capital = available_capital * allocation
+                quantity = self.order_executor.calculate_position_size(
                     symbol,
-                    side,
-                    current_price,
-                    quantity
+                    position_capital,
+                    position_ratio=self.risk_manager.max_position_size
                 )
-            else:
-                # 注文失敗時は保留ポジションをキャンセル
-                self.position_manager.cancel_pending_position(
-                    pending_position,
-                    reason=f"注文失敗: {order.get('status', 'unknown') if order else 'no_order'}"
+
+                if quantity <= 0:
+                    logger.warning(f"  {symbol} ポジションサイズ不足")
+                    return
+
+                # 注文実行（二段階コミット）
+                logger.info(f"  → 新規エントリー: {side.upper()} {quantity:.6f} {symbol} @ ¥{current_price:,.0f}")
+
+                # 価格スリッページ保護: 注文直前に価格を再取得
+                try:
+                    latest_price = self.order_executor.get_current_price(symbol)
+                    price_change_pct = abs(latest_price - current_price) / current_price * 100
+
+                    if price_change_pct > 2.0:  # 2%以上の価格変動
+                        logger.warning(f"  ⚠️  価格スリッページ検出: {price_change_pct:.2f}% "
+                                     f"(¥{current_price:,.0f} → ¥{latest_price:,.0f})")
+
+                        if price_change_pct > 5.0:  # 5%以上なら中止
+                            logger.error(f"  ✗ スリッページ過大 ({price_change_pct:.2f}%) - 注文中止")
+                            return
+
+                        # 2-5%の場合は警告のみ、最新価格で続行
+                        current_price = latest_price
+                        logger.info(f"  → 最新価格で続行: ¥{current_price:,.0f}")
+
+                        # 数量を再計算
+                        quantity = self.order_executor.calculate_position_size(
+                            symbol,
+                            position_capital,
+                            position_ratio=self.risk_manager.max_position_size
+                        )
+                        logger.info(f"  → 数量再計算: {quantity:.6f}")
+
+                except Exception as price_error:
+                    logger.warning(f"  ⚠️  最新価格取得失敗: {price_error} - 元の価格で続行")
+
+                pending_position = None  # 例外ハンドリング用に初期化
+
+                # 1. 保留ポジション作成（DB記録）
+                pending_position = self.position_manager.create_pending_position(
+                    symbol=symbol,
+                    side=side,
+                    entry_price=current_price,
+                    quantity=quantity
                 )
-                # API自体は成功したが注文が約定しなかった（これはAPI障害ではない）
-                logger.error(f"  ✗ 注文失敗: {order}")
+
+                if not pending_position:
+                    logger.error(f"  ✗ 保留ポジション作成失敗: {symbol}")
+                    return
+
+                # 2. 注文実行（API障害検出機能付き）
+                order = None
+                try:
+                    order = self.order_executor.create_market_order(
+                        symbol,
+                        'buy' if side == 'long' else 'sell',
+                        quantity
+                    )
+
+                    # API成功
+                    self._handle_api_success()
+
+                except (TimeoutError, Exception) as api_error:
+                    error_type = type(api_error).__name__
+
+                    # タイムアウトの場合は注文状態を再確認
+                    if 'timeout' in str(api_error).lower() or isinstance(api_error, TimeoutError):
+                        logger.warning(f"  ⏱️  API タイムアウト: {api_error}")
+                        logger.info(f"  → 注文状態を再確認します（60秒待機）...")
+
+                        import time
+                        time.sleep(5)  # 5秒待機
+
+                        # タイムアウト時も一応orderがあるかチェック
+                        if order and order.get('id'):
+                            try:
+                                # 注文状態を取得
+                                order_status = self.order_executor.get_order_status(order['id'], symbol)
+                                logger.info(f"  → 注文状態確認: {order_status.get('status', 'unknown')}")
+
+                                # 状態確認結果をorderに上書き
+                                if order_status:
+                                    order = order_status
+                                    # 次のif文で部分約定チェックが走る
+                            except Exception as status_error:
+                                logger.error(f"  ✗ 注文状態確認失敗: {status_error}")
+                                # 状態不明のため保留状態を維持
+                                logger.warning(f"  ⚠️  注文状態不明 - 保留ポジションを'unknown'状態に設定")
+                                self.db_manager.update_position(
+                                    pending_position.position_id,
+                                    {'status': 'execution_unknown'}
+                                )
+                                return
+                        else:
+                            # orderがない場合は失敗扱い
+                            self._handle_api_failure(operation=f"{symbol} 注文実行（タイムアウト）")
+                            self.position_manager.cancel_pending_position(
+                                pending_position,
+                                reason=f"タイムアウト: order_id不明"
+                            )
+                            logger.error(f"  ✗ タイムアウトかつorder_id取得失敗")
+                            return
+                    else:
+                        # その他のAPI障害
+                        self._handle_api_failure(operation=f"{symbol} 注文実行")
+                        self.position_manager.cancel_pending_position(
+                            pending_position,
+                            reason=f"API障害: {error_type} - {str(api_error)}"
+                        )
+                        logger.error(f"  ✗ API障害により注文失敗: {api_error}")
+                        return
+
+                # 3. 注文結果に応じて確定またはキャンセル
+                if order:
+                    filled_amount = order.get('filled', 0)
+                    requested_amount = order.get('amount', quantity)
+                    order_status = order.get('status', 'unknown')
+
+                    # 約定チェック（完全約定または部分約定）
+                    if filled_amount > 0:
+                        # 実際の約定価格を取得（ない場合は予定価格を使用）
+                        actual_price = order.get('price', current_price)
+
+                        # 部分約定の警告
+                        if filled_amount < requested_amount * 0.95:  # 95%未満なら部分約定
+                            logger.warning(f"  ⚠️  部分約定: {filled_amount:.8f}/{requested_amount:.8f} "
+                                         f"({filled_amount/requested_amount*100:.1f}%)")
+                            # 部分約定の数量でポジション確定
+                            pending_position.quantity = filled_amount
+
+                        # ポジション確定（完全約定または部分約定の数量で）
+                        if self.position_manager.confirm_pending_position(pending_position, actual_price):
+                            logger.info(f"  ✓ エントリー成功: {filled_amount:.8f} {symbol.split('/')[0]} "
+                                       f"(ポジションID={pending_position.position_id})")
+                            position = pending_position
+                        else:
+                            logger.error(f"  ✗ ポジション確定失敗")
+                            return
+                    else:
+                        # 約定数量ゼロ = 完全失敗
+                        self.position_manager.cancel_pending_position(
+                            pending_position,
+                            reason=f"約定ゼロ: status={order_status}"
+                        )
+                        logger.error(f"  ✗ 注文未約定: status={order_status}")
+                        return
+
+                    # Telegram通知（実際に約定した数量で通知）
+                    self.notifier.notify_trade_open(
+                        symbol,
+                        side,
+                        actual_price,
+                        filled_amount  # 実際の約定数量
+                    )
+                else:
+                    # order=None: 注文が全く作成されなかった
+                    self.position_manager.cancel_pending_position(
+                        pending_position,
+                        reason="注文作成失敗: order=None"
+                    )
+                    logger.error(f"  ✗ 注文作成失敗: orderがNone")
 
         except Exception as e:
             # 例外発生時も保留ポジションをキャンセル
@@ -1140,128 +1239,179 @@ class CryptoTrader:
     def _enter_pair_position(self, pair, signal, price1: float, price2: float, capital: float):
         """ペアポジションエントリー"""
         try:
-            position = self.pair_trading_strategy.open_position(
-                pair, signal, price1, price2, capital
-            )
+            # ✨ 並行処理ロック取得: ペア取引の両方の注文を排他制御
+            with self.order_lock:
+                position = self.pair_trading_strategy.open_position(
+                    pair, signal, price1, price2, capital
+                )
 
-            if position:
-                logger.info(f"    ✓ ペアポジション開始: {position.pair_id}")
-                logger.info(f"      {position.symbol1}: {position.size1:.6f}")
-                logger.info(f"      {position.symbol2}: {position.size2:.6f}")
+                if position:
+                    logger.info(f"    ✓ ペアポジション開始: {position.pair_id}")
+                    logger.info(f"      {position.symbol1}: {position.size1:.6f}")
+                    logger.info(f"      {position.symbol2}: {position.size2:.6f}")
 
-                # 残高チェック（空売り防止）
-                symbol1_base = position.symbol1.split('/')[0]  # BTC/JPY -> BTC
-                symbol2_base = position.symbol2.split('/')[0]  # ETH/JPY -> ETH
+                    # 残高チェック（空売り防止）
+                    symbol1_base = position.symbol1.split('/')[0]  # BTC/JPY -> BTC
+                    symbol2_base = position.symbol2.split('/')[0]  # ETH/JPY -> ETH
 
-                balance_ok = True
+                    balance_ok = True
 
-                if position.direction == 'long_spread':
-                    # symbol1買い、symbol2売り
-                    # symbol2の保有量をチェック
-                    balance2 = self.order_executor.get_balance(symbol2_base)
-                    available2 = balance2.get('free', 0)
-
-                    if available2 < position.size2:
-                        logger.error(f"      ✗ {symbol2_base} 残高不足: 必要{position.size2:.6f}, 保有{available2:.6f}")
-                        balance_ok = False
-                else:
-                    # symbol1売り、symbol2買い
-                    # symbol1の保有量をチェック
-                    balance1 = self.order_executor.get_balance(symbol1_base)
-                    available1 = balance1.get('free', 0)
-
-                    if available1 < position.size1:
-                        logger.error(f"      ✗ {symbol1_base} 残高不足: 必要{position.size1:.6f}, 保有{available1:.6f}")
-                        balance_ok = False
-
-                if not balance_ok:
-                    logger.error(f"      ✗ 残高不足のためペアエントリー中止")
-                    # ポジションを削除
-                    if position.pair_id in self.pair_trading_strategy.positions:
-                        del self.pair_trading_strategy.positions[position.pair_id]
-                    return
-
-                # 実際の注文実行
-                orders_success = True
-
-                # 注文1: symbol1
-                if position.direction == 'long_spread':
-                    # long_spread: symbol1を買い、symbol2を売り
-                    order1 = self.order_executor.create_market_order(position.symbol1, 'buy', position.size1)
-                else:
-                    # short_spread: symbol1を売り、symbol2を買い
-                    order1 = self.order_executor.create_market_order(position.symbol1, 'sell', position.size1)
-
-                if not order1 or order1.get('status') not in ['closed', 'filled']:
-                    logger.error(f"      ✗ {position.symbol1} 注文失敗")
-                    orders_success = False
-
-                # 注文2: symbol2
-                if orders_success:
                     if position.direction == 'long_spread':
-                        # long_spread: symbol2を売り
-                        order2 = self.order_executor.create_market_order(position.symbol2, 'sell', position.size2)
+                        # symbol1買い、symbol2売り
+                        # symbol2の保有量をチェック
+                        balance2 = self.order_executor.get_balance(symbol2_base)
+                        available2 = balance2.get('free', 0)
+
+                        if available2 < position.size2:
+                            logger.error(f"      ✗ {symbol2_base} 残高不足: 必要{position.size2:.6f}, 保有{available2:.6f}")
+                            balance_ok = False
                     else:
-                        # short_spread: symbol2を買い
-                        order2 = self.order_executor.create_market_order(position.symbol2, 'buy', position.size2)
+                        # symbol1売り、symbol2買い
+                        # symbol1の保有量をチェック
+                        balance1 = self.order_executor.get_balance(symbol1_base)
+                        available1 = balance1.get('free', 0)
 
-                    if not order2 or order2.get('status') not in ['closed', 'filled']:
-                        logger.error(f"      ✗ {position.symbol2} 注文失敗")
-                        orders_success = False
+                        if available1 < position.size1:
+                            logger.error(f"      ✗ {symbol1_base} 残高不足: 必要{position.size1:.6f}, 保有{available1:.6f}")
+                            balance_ok = False
 
-                # 両方成功した場合のみDB保存と通知
-                if orders_success:
-                    logger.info(f"      ✓ 両方の注文実行成功")
-
-                    # データベースに永続化
-                    try:
-                        self.db_manager.create_pair_position({
-                            'pair_id': position.pair_id,
-                            'symbol1': position.symbol1,
-                            'symbol2': position.symbol2,
-                            'direction': position.direction,
-                            'hedge_ratio': position.hedge_ratio,
-                            'entry_spread': position.entry_spread,
-                            'entry_z_score': position.entry_z_score,
-                            'entry_time': int(position.entry_time.timestamp()),
-                            'size1': position.size1,
-                            'size2': position.size2,
-                            'entry_price1': position.entry_price1,
-                            'entry_price2': position.entry_price2,
-                            'entry_capital': position.entry_capital
-                        })
-                    except Exception as db_error:
-                        logger.error(f"      ✗ DB保存失敗: {db_error}")
-                        # メモリからもポジションを削除
+                    if not balance_ok:
+                        logger.error(f"      ✗ 残高不足のためペアエントリー中止")
+                        # ポジションを削除
                         if position.pair_id in self.pair_trading_strategy.positions:
                             del self.pair_trading_strategy.positions[position.pair_id]
-                        # エラー通知
-                        self.notifier.notify_error(
-                            'ペアポジションDB保存失敗',
-                            f'ペア {position.pair_id} のDB保存に失敗しました。\n'
-                            f'注文は実行済みのため、手動で取引所を確認してください。\n'
-                            f'エラー: {db_error}'
-                        )
                         return
 
-                    # Telegram通知
-                    self.notifier.notify_pair_trade_open(
-                        pair_id=position.pair_id,
-                        symbol1=position.symbol1,
-                        symbol2=position.symbol2,
-                        direction=position.direction,
-                        size1=position.size1,
-                        size2=position.size2,
-                        price1=price1,
-                        price2=price2,
-                        z_score=signal.z_score,
-                        hedge_ratio=signal.hedge_ratio
-                    )
-                else:
-                    # 注文失敗時はポジションを削除
-                    logger.error(f"      ✗ 注文失敗のためポジション削除")
-                    if position.pair_id in self.pair_trading_strategy.positions:
-                        del self.pair_trading_strategy.positions[position.pair_id]
+                    # 実際の注文実行
+                    orders_success = True
+
+                    # 注文1: symbol1
+                    if position.direction == 'long_spread':
+                        # long_spread: symbol1を買い、symbol2を売り
+                        order1 = self.order_executor.create_market_order(position.symbol1, 'buy', position.size1)
+                    else:
+                        # short_spread: symbol1を売り、symbol2を買い
+                        order1 = self.order_executor.create_market_order(position.symbol1, 'sell', position.size1)
+
+                    if not order1 or order1.get('status') not in ['closed', 'filled']:
+                        logger.error(f"      ✗ {position.symbol1} 注文失敗")
+                        orders_success = False
+
+                    # 注文2: symbol2
+                    if orders_success:
+                        if position.direction == 'long_spread':
+                            # long_spread: symbol2を売り
+                            order2 = self.order_executor.create_market_order(position.symbol2, 'sell', position.size2)
+                        else:
+                            # short_spread: symbol2を買い
+                            order2 = self.order_executor.create_market_order(position.symbol2, 'buy', position.size2)
+
+                        if not order2 or order2.get('status') not in ['closed', 'filled']:
+                            logger.error(f"      ✗ {position.symbol2} 注文失敗")
+                            orders_success = False
+
+                            # ✨ CRITICAL: order1をロールバック（order1は成功していたが、order2が失敗）
+                            logger.warning(f"      ⚠️  order1ロールバック開始: {position.symbol1}")
+                            logger.warning(f"         → order2失敗により、order1を反対売買して相殺します")
+
+                            try:
+                                # order1の反対売買を実行
+                                rollback_side = 'sell' if position.direction == 'long_spread' else 'buy'
+                                rollback_order = self.order_executor.create_market_order(
+                                    position.symbol1,
+                                    rollback_side,
+                                    position.size1
+                                )
+
+                                if rollback_order and rollback_order.get('status') in ['closed', 'filled']:
+                                    logger.warning(f"      ✓ ロールバック成功: {position.symbol1} {rollback_side}")
+
+                                    # ロールバック成功を通知
+                                    self.notifier.notify_error(
+                                        'ペア取引ロールバック',
+                                        f'ペア: {position.pair_id}\n'
+                                        f'Order2失敗のため、Order1をロールバックしました。\n'
+                                        f'{position.symbol1}: {rollback_side} {position.size1:.6f}'
+                                    )
+                                else:
+                                    # ロールバック失敗 → CRITICAL
+                                    logger.error(f"      ✗✗✗ ロールバック失敗: {position.symbol1}")
+                                    logger.error(f"         → 未ヘッジポジションが残っています！")
+
+                                    # 緊急通知
+                                    self.notifier.notify_error(
+                                        '🚨 CRITICAL: ペア取引ロールバック失敗',
+                                        f'ペア: {position.pair_id}\n'
+                                        f'Order2が失敗し、Order1のロールバックも失敗しました。\n'
+                                        f'未ヘッジポジション: {position.symbol1} {position.size1:.6f}\n'
+                                        f'**手動で取引所を確認し、即座にポジションをクローズしてください**'
+                                    )
+                            except Exception as rollback_error:
+                                logger.error(f"      ✗✗✗ ロールバック処理エラー: {rollback_error}")
+
+                                # 緊急通知
+                                self.notifier.notify_error(
+                                    '🚨 CRITICAL: ペア取引ロールバックエラー',
+                                    f'ペア: {position.pair_id}\n'
+                                    f'Order2失敗後のロールバック処理でエラーが発生しました。\n'
+                                    f'未ヘッジポジション: {position.symbol1} {position.size1:.6f}\n'
+                                    f'エラー: {rollback_error}\n'
+                                    f'**手動で取引所を確認し、即座にポジションをクローズしてください**'
+                                )
+
+                    # 両方成功した場合のみDB保存と通知
+                    if orders_success:
+                        logger.info(f"      ✓ 両方の注文実行成功")
+
+                        # データベースに永続化
+                        try:
+                            self.db_manager.create_pair_position({
+                                'pair_id': position.pair_id,
+                                'symbol1': position.symbol1,
+                                'symbol2': position.symbol2,
+                                'direction': position.direction,
+                                'hedge_ratio': position.hedge_ratio,
+                                'entry_spread': position.entry_spread,
+                                'entry_z_score': position.entry_z_score,
+                                'entry_time': int(position.entry_time.timestamp()),
+                                'size1': position.size1,
+                                'size2': position.size2,
+                                'entry_price1': position.entry_price1,
+                                'entry_price2': position.entry_price2,
+                                'entry_capital': position.entry_capital
+                            })
+                        except Exception as db_error:
+                            logger.error(f"      ✗ DB保存失敗: {db_error}")
+                            # メモリからもポジションを削除
+                            if position.pair_id in self.pair_trading_strategy.positions:
+                                del self.pair_trading_strategy.positions[position.pair_id]
+                            # エラー通知
+                            self.notifier.notify_error(
+                                'ペアポジションDB保存失敗',
+                                f'ペア {position.pair_id} のDB保存に失敗しました。\n'
+                                f'注文は実行済みのため、手動で取引所を確認してください。\n'
+                                f'エラー: {db_error}'
+                            )
+                            return
+
+                        # Telegram通知
+                        self.notifier.notify_pair_trade_open(
+                            pair_id=position.pair_id,
+                            symbol1=position.symbol1,
+                            symbol2=position.symbol2,
+                            direction=position.direction,
+                            size1=position.size1,
+                            size2=position.size2,
+                            price1=price1,
+                            price2=price2,
+                            z_score=signal.z_score,
+                            hedge_ratio=signal.hedge_ratio
+                        )
+                    else:
+                        # 注文失敗時はポジションを削除
+                        logger.error(f"      ✗ 注文失敗のためポジション削除")
+                        if position.pair_id in self.pair_trading_strategy.positions:
+                            del self.pair_trading_strategy.positions[position.pair_id]
 
         except Exception as e:
             logger.error(f"ペアエントリーエラー: {e}")
@@ -1307,14 +1457,70 @@ class CryptoTrader:
                     logger.error(f"      ✗ {position.symbol2} 決済注文失敗")
                     orders_success = False
 
+                    # ✨ CRITICAL: order1をロールバック（order1の決済は成功したが、order2の決済が失敗）
+                    # → order1を再オープンしてヘッジ状態に戻す
+                    logger.warning(f"      ⚠️  order1ロールバック開始: {position.symbol1}")
+                    logger.warning(f"         → order2決済失敗により、order1を反対売買してヘッジ状態に戻します")
+
+                    try:
+                        # order1の反対売買を実行（決済の逆 = 再オープン）
+                        if position.direction == 'long_spread':
+                            # long_spread時にsymbol1を売却していた → 買い戻してロング再構築
+                            rollback_side = 'buy'
+                        else:
+                            # short_spread時にsymbol1を買い戻していた → 売却してショート再構築
+                            rollback_side = 'sell'
+
+                        rollback_order = self.order_executor.create_market_order(
+                            position.symbol1,
+                            rollback_side,
+                            position.size1
+                        )
+
+                        if rollback_order and rollback_order.get('status') in ['closed', 'filled']:
+                            logger.warning(f"      ✓ ロールバック成功: {position.symbol1} {rollback_side}")
+                            logger.warning(f"         → ヘッジ状態を復元しました")
+
+                            # ロールバック成功を通知
+                            self.notifier.notify_error(
+                                'ペア取引クローズ・ロールバック',
+                                f'ペア: {position.pair_id}\n'
+                                f'Order2決済失敗のため、Order1をロールバックしました。\n'
+                                f'{position.symbol1}: {rollback_side} {position.size1:.6f}\n'
+                                f'ヘッジ状態を維持しています。'
+                            )
+                        else:
+                            # ロールバック失敗 → CRITICAL（片側だけクローズされた状態）
+                            logger.error(f"      ✗✗✗ ロールバック失敗: {position.symbol1}")
+                            logger.error(f"         → 片側だけクローズされています！")
+
+                            # 緊急通知
+                            self.notifier.notify_error(
+                                '🚨 CRITICAL: ペア取引クローズ・ロールバック失敗',
+                                f'ペア: {position.pair_id}\n'
+                                f'Order2決済が失敗し、Order1のロールバックも失敗しました。\n'
+                                f'片側クローズ状態: {position.symbol1} のみクローズ済み\n'
+                                f'{position.symbol2} はまだオープン中\n'
+                                f'**手動で取引所を確認し、ヘッジ状態を復元してください**'
+                            )
+                    except Exception as rollback_error:
+                        logger.error(f"      ✗✗✗ ロールバック処理エラー: {rollback_error}")
+
+                        # 緊急通知
+                        self.notifier.notify_error(
+                            '🚨 CRITICAL: ペア取引クローズ・ロールバックエラー',
+                            f'ペア: {position.pair_id}\n'
+                            f'Order2決済失敗後のロールバック処理でエラーが発生しました。\n'
+                            f'片側クローズ状態: {position.symbol1} のみクローズ済み\n'
+                            f'{position.symbol2} はまだオープン中\n'
+                            f'エラー: {rollback_error}\n'
+                            f'**手動で取引所を確認し、ヘッジ状態を復元してください**'
+                        )
+
             # 両方の決済注文が成功した場合のみ処理を続行
             if not orders_success:
                 logger.error(f"      ✗ ペアポジション決済失敗: {position.pair_id}")
-                logger.error(f"      一部注文のみ成功の可能性あり - 手動確認が必要です")
-                self.notifier.notify_error(
-                    'ペアポジション決済エラー',
-                    f'ペア {position.pair_id} の決済注文が失敗しました。取引所で状態を確認してください。'
-                )
+                logger.error(f"      ロールバック処理を実行しました（上記ログ参照）")
                 return
 
             # 決済成功 - メモリから削除、損益計算
