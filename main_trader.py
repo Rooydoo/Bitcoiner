@@ -55,7 +55,8 @@ from utils.constants import (
     DB_CONNECTION_REFRESH_CYCLES,
     ORDER_STATUS_RETRY_DELAYS,
     ORDER_SUCCESS_STATUSES,
-    ORDER_FINAL_STATUSES
+    ORDER_FINAL_STATUSES,
+    MAX_ROLLBACK_RETRIES
 )
 
 # ロガー設定
@@ -1575,13 +1576,12 @@ class CryptoTrader:
                                 # BLOCKER-1: リトライロジック付きロールバック（間に合わせ対応）
                                 rollback_side = 'sell' if position.direction == 'long_spread' else 'buy'
                                 rollback_success = False
-                                max_rollback_retries = 3
 
-                                for retry_attempt in range(max_rollback_retries):
+                                for retry_attempt in range(MAX_ROLLBACK_RETRIES):
                                     if retry_attempt > 0:
                                         import time
                                         wait_time = 2 ** retry_attempt  # 指数バックオフ: 2s, 4s
-                                        logger.warning(f"      リトライ {retry_attempt}/{max_rollback_retries-1}: {wait_time}秒待機...")
+                                        logger.warning(f"      リトライ {retry_attempt}/{MAX_ROLLBACK_RETRIES-1}: {wait_time}秒待機...")
                                         time.sleep(wait_time)
 
                                     rollback_order = self.order_executor.create_market_order(
@@ -1607,7 +1607,7 @@ class CryptoTrader:
 
                                 if not rollback_success:
                                     # 全リトライ失敗 → CRITICAL
-                                    logger.error(f"      ✗✗✗ ロールバック全{max_rollback_retries}回失敗: {position.symbol1}")
+                                    logger.error(f"      ✗✗✗ ロールバック全{MAX_ROLLBACK_RETRIES}回失敗: {position.symbol1}")
                                     logger.error(f"         → 未ヘッジポジションが残っています！")
 
                                     # 緊急通知
@@ -1753,13 +1753,12 @@ class CryptoTrader:
                             rollback_side = 'sell'
 
                         rollback_success = False
-                        max_rollback_retries = 3
 
-                        for retry_attempt in range(max_rollback_retries):
+                        for retry_attempt in range(MAX_ROLLBACK_RETRIES):
                             if retry_attempt > 0:
                                 import time
                                 wait_time = 2 ** retry_attempt
-                                logger.warning(f"      リトライ {retry_attempt}/{max_rollback_retries-1}: {wait_time}秒待機...")
+                                logger.warning(f"      リトライ {retry_attempt}/{MAX_ROLLBACK_RETRIES-1}: {wait_time}秒待機...")
                                 time.sleep(wait_time)
 
                             rollback_order = self.order_executor.create_market_order(
@@ -1787,7 +1786,7 @@ class CryptoTrader:
 
                         if not rollback_success:
                             # 全リトライ失敗 → CRITICAL
-                            logger.error(f"      ✗✗✗ ロールバック全{max_rollback_retries}回失敗: {position.symbol1}")
+                            logger.error(f"      ✗✗✗ ロールバック全{MAX_ROLLBACK_RETRIES}回失敗: {position.symbol1}")
                             logger.error(f"         → 片側だけクローズされています！")
 
                             # 緊急通知

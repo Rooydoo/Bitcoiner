@@ -35,3 +35,6 @@ API_FAILURE_THRESHOLD = 5  # セーフモード発動までのAPI失敗回数
 # ========== 注文ステータス ==========
 ORDER_SUCCESS_STATUSES = ['closed', 'filled']  # 注文成功とみなすステータス
 ORDER_FINAL_STATUSES = ['closed', 'filled', 'canceled']  # 注文が確定したステータス
+
+# ========== ロールバック設定 ==========
+MAX_ROLLBACK_RETRIES = 3  # ペア取引ロールバックの最大リトライ回数
