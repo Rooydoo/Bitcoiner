@@ -51,3 +51,7 @@ ORDER_SELL = 'sell'
 # ========== ペア取引方向 ==========
 PAIR_LONG_SPREAD = 'long_spread'  # symbol1買い、symbol2売り
 PAIR_SHORT_SPREAD = 'short_spread'  # symbol1売り、symbol2買い
+
+# ========== リトライ・待機時間 ==========
+ROLLBACK_RETRY_WAIT_BASE = 2  # ロールバックリトライの指数バックオフ基数（秒）
+ERROR_RECOVERY_WAIT = 60  # 非APIエラー後の待機時間（秒）

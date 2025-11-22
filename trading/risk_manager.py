@@ -6,6 +6,7 @@
 import logging
 from typing import Dict, Optional, Tuple
 from trading.position_manager import Position
+from utils.constants import SIDE_SHORT
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +221,7 @@ class RiskManager:
         risk_amount = available_capital * (risk_per_trade_pct / 100)
 
         # ストップロス幅（ロング/ショートに応じて計算）
-        if side == 'short':
+        if side == SIDE_SHORT:
             # ショート: 価格が上がると損失
             stop_loss_price = current_price * (1 + self.stop_loss_pct / 100)
             risk_per_unit = stop_loss_price - current_price

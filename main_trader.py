@@ -63,7 +63,9 @@ from utils.constants import (
     ORDER_BUY,
     ORDER_SELL,
     PAIR_LONG_SPREAD,
-    PAIR_SHORT_SPREAD
+    PAIR_SHORT_SPREAD,
+    ROLLBACK_RETRY_WAIT_BASE,
+    ERROR_RECOVERY_WAIT
 )
 
 # ロガー設定
@@ -1551,12 +1553,12 @@ class CryptoTrader:
                     orders_success = True
 
                     # 注文1: symbol1
-                    if position.direction == 'long_spread':
+                    if position.direction == PAIR_LONG_SPREAD:
                         # long_spread: symbol1を買い、symbol2を売り
-                        order1 = self.order_executor.create_market_order(position.symbol1, 'buy', position.size1)
+                        order1 = self.order_executor.create_market_order(position.symbol1, ORDER_BUY, position.size1)
                     else:
                         # short_spread: symbol1を売り、symbol2を買い
-                        order1 = self.order_executor.create_market_order(position.symbol1, 'sell', position.size1)
+                        order1 = self.order_executor.create_market_order(position.symbol1, ORDER_SELL, position.size1)
 
                     if not order1 or order1.get('status') not in ORDER_SUCCESS_STATUSES:
                         logger.error(f"      ✗ {position.symbol1} 注文失敗")
@@ -1564,12 +1566,12 @@ class CryptoTrader:
 
                     # 注文2: symbol2
                     if orders_success:
-                        if position.direction == 'long_spread':
+                        if position.direction == PAIR_LONG_SPREAD:
                             # long_spread: symbol2を売り
-                            order2 = self.order_executor.create_market_order(position.symbol2, 'sell', position.size2)
+                            order2 = self.order_executor.create_market_order(position.symbol2, ORDER_SELL, position.size2)
                         else:
                             # short_spread: symbol2を買い
-                            order2 = self.order_executor.create_market_order(position.symbol2, 'buy', position.size2)
+                            order2 = self.order_executor.create_market_order(position.symbol2, ORDER_BUY, position.size2)
 
                         if not order2 or order2.get('status') not in ORDER_SUCCESS_STATUSES:
                             logger.error(f"      ✗ {position.symbol2} 注文失敗")
@@ -1581,13 +1583,13 @@ class CryptoTrader:
 
                             try:
                                 # BLOCKER-1: リトライロジック付きロールバック（間に合わせ対応）
-                                rollback_side = 'sell' if position.direction == 'long_spread' else 'buy'
+                                rollback_side = ORDER_SELL if position.direction == PAIR_LONG_SPREAD else ORDER_BUY
                                 rollback_success = False
 
                                 for retry_attempt in range(MAX_ROLLBACK_RETRIES):
                                     if retry_attempt > 0:
                                         import time
-                                        wait_time = 2 ** retry_attempt  # 指数バックオフ: 2s, 4s
+                                        wait_time = ROLLBACK_RETRY_WAIT_BASE ** retry_attempt  # 指数バックオフ: 2s, 4s
                                         logger.warning(f"      リトライ {retry_attempt}/{MAX_ROLLBACK_RETRIES-1}: {wait_time}秒待機...")
                                         time.sleep(wait_time)
 
@@ -1723,12 +1725,12 @@ class CryptoTrader:
             orders_success = True
 
             # 注文1: symbol1を決済
-            if position.direction == 'long_spread':
+            if position.direction == PAIR_LONG_SPREAD:
                 # long_spread時にsymbol1を買っていた → 売却
-                order1 = self.order_executor.create_market_order(position.symbol1, 'sell', position.size1)
+                order1 = self.order_executor.create_market_order(position.symbol1, ORDER_SELL, position.size1)
             else:
                 # short_spread時にsymbol1を売っていた → 買い戻し
-                order1 = self.order_executor.create_market_order(position.symbol1, 'buy', position.size1)
+                order1 = self.order_executor.create_market_order(position.symbol1, ORDER_BUY, position.size1)
 
             if not order1 or order1.get('status') not in ORDER_SUCCESS_STATUSES:
                 logger.error(f"      ✗ {position.symbol1} 決済注文失敗")
@@ -1736,12 +1738,12 @@ class CryptoTrader:
 
             # 注文2: symbol2を決済
             if orders_success:
-                if position.direction == 'long_spread':
+                if position.direction == PAIR_LONG_SPREAD:
                     # long_spread時にsymbol2を売っていた → 買い戻し
-                    order2 = self.order_executor.create_market_order(position.symbol2, 'buy', position.size2)
+                    order2 = self.order_executor.create_market_order(position.symbol2, ORDER_BUY, position.size2)
                 else:
                     # short_spread時にsymbol2を買っていた → 売却
-                    order2 = self.order_executor.create_market_order(position.symbol2, 'sell', position.size2)
+                    order2 = self.order_executor.create_market_order(position.symbol2, ORDER_SELL, position.size2)
 
                 if not order2 or order2.get('status') not in ORDER_SUCCESS_STATUSES:
                     logger.error(f"      ✗ {position.symbol2} 決済注文失敗")
@@ -1754,17 +1756,17 @@ class CryptoTrader:
 
                     try:
                         # BLOCKER-1: リトライロジック付きロールバック（クローズ時も同様）
-                        if position.direction == 'long_spread':
-                            rollback_side = 'buy'
+                        if position.direction == PAIR_LONG_SPREAD:
+                            rollback_side = ORDER_BUY
                         else:
-                            rollback_side = 'sell'
+                            rollback_side = ORDER_SELL
 
                         rollback_success = False
 
                         for retry_attempt in range(MAX_ROLLBACK_RETRIES):
                             if retry_attempt > 0:
                                 import time
-                                wait_time = 2 ** retry_attempt
+                                wait_time = ROLLBACK_RETRY_WAIT_BASE ** retry_attempt
                                 logger.warning(f"      リトライ {retry_attempt}/{MAX_ROLLBACK_RETRIES-1}: {wait_time}秒待機...")
                                 time.sleep(wait_time)
 
@@ -2248,7 +2250,7 @@ class CryptoTrader:
                             break
                         else:
                             # リトライ前に待機（指数バックオフ）
-                            wait_time = 2 ** consecutive_api_errors  # 2, 4, 8秒
+                            wait_time = ROLLBACK_RETRY_WAIT_BASE ** consecutive_api_errors  # 2, 4, 8秒
                             logger.info(f"{wait_time}秒待機後にリトライします...")
                             time.sleep(wait_time)
                     else:
@@ -2258,7 +2260,7 @@ class CryptoTrader:
                         self.notifier.notify_error('取引サイクルエラー', str(cycle_error))
 
                         # 1サイクルスキップして継続
-                        time.sleep(60)
+                        time.sleep(ERROR_RECOVERY_WAIT)
 
         except KeyboardInterrupt:
             logger.info("\n中断シグナル受信 - シャットダウン中...")

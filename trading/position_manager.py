@@ -8,7 +8,7 @@ import threading
 from typing import Dict, Optional, List
 from datetime import datetime
 from data.storage.sqlite_manager import SQLiteManager
-from utils.constants import BITFLYER_COMMISSION_RATE
+from utils.constants import BITFLYER_COMMISSION_RATE, SIDE_LONG, SIDE_SHORT
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ class Position:
         Returns:
             未実現損益（手数料控除後）
         """
-        if self.side == 'long':
+        if self.side == SIDE_LONG:
             pnl = (current_price - self.entry_price) * self.quantity
         else:  # short
             pnl = (self.entry_price - current_price) * self.quantity
@@ -165,7 +165,7 @@ class PositionManager:
 
             # ショートポジション検証: bitFlyer現物市場では空売り不可
             # FX_BTC_JPY以外でショートを試みた場合はエラー
-            if side == 'short' and not symbol.startswith('FX_'):
+            if side == SIDE_SHORT and not symbol.startswith('FX_'):
                 logger.error(f"現物市場 {symbol} ではショートポジションは取引できません。"
                             f"ショートポジションはFX_BTC_JPYのみ対応しています。")
                 return None
@@ -216,7 +216,7 @@ class PositionManager:
             return None
 
         # ショートポジション検証
-        if side == 'short' and not symbol.startswith('FX_'):
+        if side == SIDE_SHORT and not symbol.startswith('FX_'):
             logger.error(f"現物市場 {symbol} ではショートポジション不可")
             return None
 
@@ -351,7 +351,7 @@ class PositionManager:
         # 部分決済のPNL計算（手数料考慮）
         commission_rate = BITFLYER_COMMISSION_RATE
 
-        if position.side == 'long':
+        if position.side == SIDE_LONG:
             partial_pnl = (exit_price - position.entry_price) * partial_quantity
         else:  # short
             partial_pnl = (position.entry_price - exit_price) * partial_quantity
