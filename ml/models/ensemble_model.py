@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import logging
 from typing import Dict, Tuple, Optional, List
-import pickle
+import joblib
 from pathlib import Path
 
 from ml.models.hmm_model import MarketRegimeHMM
@@ -338,8 +338,7 @@ class EnsembleModel:
             'lgbm_path': lgbm_path
         }
 
-        with open(filepath, 'wb') as f:
-            pickle.dump(ensemble_data, f)
+        joblib.dump(ensemble_data, filepath, compress=3)
 
         logger.info(f"アンサンブルモデル保存: {filepath}")
 
@@ -350,8 +349,7 @@ class EnsembleModel:
         Args:
             filepath: 読み込み元パス
         """
-        with open(filepath, 'rb') as f:
-            ensemble_data = pickle.load(f)
+        ensemble_data = joblib.load(filepath)
 
         # 個別モデルを読み込み
         self.hmm_model = MarketRegimeHMM()

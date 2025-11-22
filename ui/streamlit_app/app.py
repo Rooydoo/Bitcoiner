@@ -1,6 +1,8 @@
 """Streamlit メインアプリケーション"""
 
 import streamlit as st
+import os
+import hashlib
 
 st.set_page_config(
     page_title="CryptoTrader Dashboard",
@@ -8,12 +10,55 @@ st.set_page_config(
     layout="wide"
 )
 
+# 認証機能
+def check_password():
+    """パスワード認証を実施"""
+
+    # セッション状態の初期化
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+
+    # 既に認証済みの場合
+    if st.session_state.authenticated:
+        return True
+
+    # 環境変数から認証情報を取得
+    correct_username = os.getenv('STREAMLIT_USERNAME', 'admin')
+    correct_password = os.getenv('STREAMLIT_PASSWORD', 'admin')
+
+    # ログインフォーム
+    st.title("🔐 CryptoTrader ログイン")
+
+    with st.form("login_form"):
+        username = st.text_input("ユーザー名")
+        password = st.text_input("パスワード", type="password")
+        submit = st.form_submit_button("ログイン")
+
+        if submit:
+            if username == correct_username and password == correct_password:
+                st.session_state.authenticated = True
+                st.success("✅ ログイン成功！")
+                st.rerun()
+            else:
+                st.error("❌ ユーザー名またはパスワードが間違っています")
+
+    return False
+
+# 認証チェック
+if not check_password():
+    st.stop()
+
+# ログアウトボタン（サイドバー）
+if st.sidebar.button("ログアウト"):
+    st.session_state.authenticated = False
+    st.rerun()
+
 st.title("🚀 CryptoTrader Dashboard")
 st.write("暗号資産自動売買システム")
 
 # サイドバー
 st.sidebar.title("ナビゲーション")
-page = st.sidebar.radio("ページ選択", 
+page = st.sidebar.radio("ページ選択",
     ["ダッシュボード", "レポート", "Telegram", "設定", "システム"])
 
 if page == "ダッシュボード":

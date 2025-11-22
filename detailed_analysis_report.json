@@ -1,0 +1,514 @@
+{
+  "summary": {
+    "total_issues": 62,
+    "by_severity": {
+      "critical": 2,
+      "high": 48,
+      "medium": 12
+    },
+    "by_type": {
+      "ENCODING_ERROR": 2,
+      "IMPORT_ERROR": 48,
+      "MUTABLE_DEFAULT": 5,
+      "BARE_EXCEPT": 7
+    }
+  },
+  "issues": [
+    {
+      "file": "/home/user/Bitcoiner/ml/models/__init__.py",
+      "line": 0,
+      "type": "ENCODING_ERROR",
+      "description": "File encoding error: 'utf-8' codec can't decode byte 0xb0 in position 4: invalid start byte. File is not valid UTF-8.",
+      "severity": "critical",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/trading/strategy/__init__.py",
+      "line": 0,
+      "type": "ENCODING_ERROR",
+      "description": "File encoding error: 'utf-8' codec can't decode byte 0xc8 in position 3: invalid continuation byte. File is not valid UTF-8.",
+      "severity": "critical",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/data/collector/binance_api.py",
+      "line": 3,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'ccxt' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/data/collector/binance_api.py",
+      "line": 9,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'pandas' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/data/collector/binance_api.py",
+      "line": 10,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'dotenv' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/data/collector/bitflyer_api.py",
+      "line": 3,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'ccxt' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/data/collector/bitflyer_api.py",
+      "line": 11,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'pandas' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/data/collector/bitflyer_api.py",
+      "line": 12,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'dotenv' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/data/collector/data_orchestrator.py",
+      "line": 6,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'pandas' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/data/processor/indicators.py",
+      "line": 4,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'numpy' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/data/processor/indicators.py",
+      "line": 5,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'pandas' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/data/storage/sqlite_manager.py",
+      "line": 8,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'pandas' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/main_trader.py",
+      "line": 12,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'pandas' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/main_trader.py",
+      "line": 13,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'numpy' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/ml/backtesting/backtest_engine.py",
+      "line": 6,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'numpy' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/ml/backtesting/backtest_engine.py",
+      "line": 7,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'pandas' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/ml/models/cointegration_analyzer.py",
+      "line": 10,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'numpy' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/ml/models/cointegration_analyzer.py",
+      "line": 11,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'pandas' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/ml/models/cointegration_analyzer.py",
+      "line": 12,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'statsmodels' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/ml/models/cointegration_analyzer.py",
+      "line": 13,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'statsmodels' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/ml/models/cointegration_analyzer.py",
+      "line": 14,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'statsmodels' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/ml/models/ensemble_model.py",
+      "line": 6,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'numpy' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/ml/models/ensemble_model.py",
+      "line": 7,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'pandas' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/ml/models/ensemble_model.py",
+      "line": 292,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'sklearn' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/ml/models/hmm_model.py",
+      "line": 6,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'numpy' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/ml/models/hmm_model.py",
+      "line": 7,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'pandas' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/ml/models/hmm_model.py",
+      "line": 12,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'hmmlearn' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/ml/models/hmm_model.py",
+      "line": 13,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'sklearn' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/ml/models/lightgbm_model.py",
+      "line": 6,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'numpy' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/ml/models/lightgbm_model.py",
+      "line": 7,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'pandas' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/ml/models/lightgbm_model.py",
+      "line": 12,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'lightgbm' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/ml/models/lightgbm_model.py",
+      "line": 13,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'sklearn' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/ml/models/lightgbm_model.py",
+      "line": 14,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'sklearn' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/ml/training/feature_engineering.py",
+      "line": 6,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'pandas' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/ml/training/feature_engineering.py",
+      "line": 7,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'numpy' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/notification/telegram_bot_handler.py",
+      "line": 11,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'telegram' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/notification/telegram_bot_handler.py",
+      "line": 12,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'telegram' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/trading/order_executor.py",
+      "line": 12,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'ccxt' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/trading/strategy/pair_trading_strategy.py",
+      "line": 10,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'pandas' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/trading/strategy/pair_trading_strategy.py",
+      "line": 11,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'numpy' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/utils/config_loader.py",
+      "line": 10,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'dotenv' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/utils/env_validator.py",
+      "line": 11,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'dotenv' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/utils/health_check.py",
+      "line": 8,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'psutil' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/utils/performance_ratio.py",
+      "line": 9,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'pandas' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/utils/performance_ratio.py",
+      "line": 10,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'numpy' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/utils/performance_tracker.py",
+      "line": 7,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'numpy' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/utils/performance_tracker.py",
+      "line": 8,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'pandas' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/utils/resource_monitor.py",
+      "line": 3,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'psutil' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/utils/retry.py",
+      "line": 91,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'ccxt' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/utils/strategy_advisor.py",
+      "line": 490,
+      "type": "IMPORT_ERROR",
+      "description": "Module 'anthropic' may not be installed or does not exist",
+      "severity": "high",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/data/processor/indicators.py",
+      "line": 52,
+      "type": "MUTABLE_DEFAULT",
+      "description": "Function 'add_sma' has mutable default argument",
+      "severity": "medium",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/data/processor/indicators.py",
+      "line": 68,
+      "type": "MUTABLE_DEFAULT",
+      "description": "Function 'add_ema' has mutable default argument",
+      "severity": "medium",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/data/processor/indicators.py",
+      "line": 305,
+      "type": "MUTABLE_DEFAULT",
+      "description": "Function 'add_price_changes' has mutable default argument",
+      "severity": "medium",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/data/processor/indicators.py",
+      "line": 322,
+      "type": "MUTABLE_DEFAULT",
+      "description": "Function 'add_volume_changes' has mutable default argument",
+      "severity": "medium",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/ml/training/feature_engineering.py",
+      "line": 244,
+      "type": "MUTABLE_DEFAULT",
+      "description": "Function '_add_lag_features' has mutable default argument",
+      "severity": "medium",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/notification/telegram_bot_handler.py",
+      "line": 89,
+      "type": "BARE_EXCEPT",
+      "description": "Bare except clause - should specify exception type",
+      "severity": "medium",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/notification/telegram_bot_handler.py",
+      "line": 118,
+      "type": "BARE_EXCEPT",
+      "description": "Bare except clause - should specify exception type",
+      "severity": "medium",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/notification/telegram_bot_handler.py",
+      "line": 443,
+      "type": "BARE_EXCEPT",
+      "description": "Bare except clause - should specify exception type",
+      "severity": "medium",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/notification/telegram_bot_handler.py",
+      "line": 454,
+      "type": "BARE_EXCEPT",
+      "description": "Bare except clause - should specify exception type",
+      "severity": "medium",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/notification/telegram_bot_handler.py",
+      "line": 585,
+      "type": "BARE_EXCEPT",
+      "description": "Bare except clause - should specify exception type",
+      "severity": "medium",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/notification/telegram_bot_handler.py",
+      "line": 593,
+      "type": "BARE_EXCEPT",
+      "description": "Bare except clause - should specify exception type",
+      "severity": "medium",
+      "code": ""
+    },
+    {
+      "file": "/home/user/Bitcoiner/notification/telegram_bot_handler.py",
+      "line": 866,
+      "type": "BARE_EXCEPT",
+      "description": "Bare except clause - should specify exception type",
+      "severity": "medium",
+      "code": ""
+    }
+  ]
+}

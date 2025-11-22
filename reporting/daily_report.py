@@ -5,9 +5,11 @@
 
 import logging
 import sys
+import sqlite3
 from pathlib import Path
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta
+import pandas as pd
 from data.storage.sqlite_manager import SQLiteManager
 
 # プロジェクトルートをパスに追加

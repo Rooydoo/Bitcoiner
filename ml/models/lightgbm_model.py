@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import logging
 from typing import Tuple, List, Optional, Dict, Union
-import pickle
+import joblib
 from pathlib import Path
 import lightgbm as lgb
 from sklearn.model_selection import train_test_split
@@ -336,8 +336,7 @@ class PriceDirectionLGBM:
             'is_fitted': self.is_fitted
         }
 
-        with open(filepath, 'wb') as f:
-            pickle.dump(model_data, f)
+        joblib.dump(model_data, filepath, compress=3)
 
         logger.info(f"LightGBMモデル保存: {filepath}")
 
@@ -348,8 +347,7 @@ class PriceDirectionLGBM:
         Args:
             filepath: 読み込み元パス
         """
-        with open(filepath, 'rb') as f:
-            model_data = pickle.load(f)
+        model_data = joblib.load(filepath)
 
         self.model = model_data['model']
         self.params = model_data['params']

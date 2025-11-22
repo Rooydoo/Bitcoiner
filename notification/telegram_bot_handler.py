@@ -86,7 +86,8 @@ class TelegramBotHandler:
                 balance = self.trader.order_executor.get_balance('JPY')
                 total_balance = balance.get('total', 0)
                 available = balance.get('free', 0)
-            except:
+            except Exception as e:
+                logger.warning(f"残高取得エラー: {e}")
                 total_balance = 0
                 available = 0
 
@@ -115,7 +116,7 @@ class TelegramBotHandler:
                         current_price = self.trader.order_executor.get_current_price(pos.symbol)
                         unrealized_pnl_pct = pos.calculate_unrealized_pnl_pct(current_price)
                         message += f"\n• {pos.symbol} {pos.side.upper()}: {unrealized_pnl_pct:+.2f}%"
-                    except:
+                    except Exception:
                         message += f"\n• {pos.symbol} {pos.side.upper()}"
 
             message += f"\n\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
@@ -440,7 +441,7 @@ class TelegramBotHandler:
             try:
                 balance = self.trader.order_executor.get_balance('JPY')
                 cash_balance = balance.get('free', 0) + balance.get('used', 0)
-            except:
+            except Exception:
                 pass
 
             # 現在のポジション価値を計算
@@ -451,7 +452,7 @@ class TelegramBotHandler:
                 try:
                     current_price = self.trader.order_executor.get_current_price(pos.symbol)
                     current_crypto += pos.quantity * current_price
-                except:
+                except Exception:
                     pass
 
             total_assets = cash_balance + current_crypto
@@ -582,7 +583,7 @@ class TelegramBotHandler:
                 try:
                     balance = self.trader.order_executor.get_balance('JPY')
                     cash_balance = balance.get('free', 0) + balance.get('used', 0)
-                except:
+                except Exception:
                     pass
 
                 positions = self.trader.position_manager.get_all_positions()
@@ -590,7 +591,7 @@ class TelegramBotHandler:
                     try:
                         current_price = self.trader.order_executor.get_current_price(pos.symbol)
                         position_value += pos.quantity * current_price
-                    except:
+                    except Exception:
                         pass
 
             total_assets = cash_balance + position_value
@@ -863,7 +864,7 @@ class TelegramBotHandler:
         if self.application:
             try:
                 self.application.stop()
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"アプリケーション停止時のエラー（無視）: {e}")
 
         logger.info("Telegram Bot停止完了")

@@ -1,0 +1,111 @@
+===============================================================================
+                     STATIC CODE ANALYSIS SUMMARY
+===============================================================================
+
+Total Issues: 173 across 30 files
+
+SEVERITY BREAKDOWN:
+┌──────────┬───────┬─────────┐
+│ Severity │ Count │ Percent │
+├──────────┼───────┼─────────┤
+│ CRITICAL │     2 │    1.2% │
+│ HIGH     │    58 │   33.5% │
+│ MEDIUM   │    91 │   52.6% │
+│ LOW      │    22 │   12.7% │
+└──────────┴───────┴─────────┘
+
+ISSUE TYPES:
+┌──────────────────────────────┬───────┐
+│ Type                         │ Count │
+├──────────────────────────────┼───────┤
+│ Missing Dependencies         │    48 │
+│ Unused Imports               │    43 │
+│ F-strings w/o Placeholders   │    27 │
+│ Imports Not at Top           │    26 │
+│ Continuation Line Indent     │    19 │
+│ Lines Too Long               │    18 │
+│ Undefined Variables (pandas) │    10 │
+│ Unused Local Variables       │     8 │
+│ Bare Except Clauses          │     7 │
+│ Mutable Default Arguments    │     5 │
+│ Inline Comment Spacing       │     3 │
+│ Encoding Errors              │     2 │
+│ Variable Redefinition        │     1 │
+│ Missing Blank Lines          │     1 │
+└──────────────────────────────┴───────┘
+
+MOST AFFECTED FILES:
+┌─────────────────────────────────────────────────┬────────┐
+│ File                                            │ Issues │
+├─────────────────────────────────────────────────┼────────┤
+│ notification/telegram_bot_handler.py            │    15  │
+│ reporting/daily_report.py                       │    14  │
+│ main_trader.py                                  │    14  │
+│ utils/strategy_advisor.py                       │    10  │
+│ ml/models/lightgbm_model.py                     │     9  │
+│ ml/training/feature_engineering.py              │     7  │
+│ utils/performance_tracker.py                    │     7  │
+│ trading/risk_manager.py                         │     7  │
+│ data/processor/indicators.py                    │     6  │
+│ ml/models/ensemble_model.py                     │     6  │
+└─────────────────────────────────────────────────┴────────┘
+
+CRITICAL ISSUES REQUIRING IMMEDIATE ATTENTION:
+
+1. FILE ENCODING ERRORS (2 files)
+   ❌ ml/models/__init__.py - Invalid UTF-8 encoding
+   ❌ trading/strategy/__init__.py - Invalid UTF-8 encoding
+   → These files CANNOT be imported in Python 3
+
+2. MISSING IMPORTS (will cause runtime crashes)
+   ❌ reporting/daily_report.py - Missing: pandas, sqlite3
+   → Code uses pd.read_sql_query() without importing pandas
+   → Code uses sqlite3.connect() without importing sqlite3
+
+HIGH PRIORITY ISSUES:
+
+3. MISSING EXTERNAL DEPENDENCIES (48 import errors)
+   ⚠ ccxt - Used in 4 files
+   ⚠ pandas - Used in 15 files  
+   ⚠ numpy - Used in 9 files
+   ⚠ statsmodels, sklearn, hmmlearn, lightgbm, telegram, etc.
+   → Ensure all dependencies in requirements.txt are installed
+
+4. BARE EXCEPT CLAUSES (7 occurrences)
+   ⚠ notification/telegram_bot_handler.py (7 instances)
+   → Should specify exception types to avoid catching system exits
+
+5. VARIABLE REDEFINITION
+   ⚠ trading/risk_manager.py:342 - Redefines 'datetime'
+
+ACTIONABLE FIXES:
+
+Priority 1 (MUST FIX):
+  □ Convert 2 files to UTF-8 encoding
+  □ Add missing imports to daily_report.py
+  □ Verify all dependencies are installed
+
+Priority 2 (SHOULD FIX):
+  □ Fix 7 bare except clauses
+  □ Fix 5 mutable default arguments
+  □ Fix variable redefinition
+
+Priority 3 (NICE TO FIX):
+  □ Remove 43 unused imports
+  □ Fix 27 unnecessary f-strings
+  □ Move 26 imports to top of files
+  □ Fix 19 indentation issues
+  □ Remove 8 unused variables
+
+OVERALL ASSESSMENT:
+  ✓ No syntax errors (except encoding)
+  ✓ No circular imports
+  ✓ No mixed tabs/spaces
+  ✗ 2 critical encoding issues
+  ✗ 10 runtime error risks (missing pandas import)
+  ~ Code quality good overall, needs cleanup
+
+===============================================================================
+For detailed report, see: /home/user/Bitcoiner/STATIC_ANALYSIS_REPORT.md
+For JSON data, see: /home/user/Bitcoiner/detailed_analysis_report.json
+===============================================================================

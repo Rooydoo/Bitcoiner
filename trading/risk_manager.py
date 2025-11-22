@@ -200,7 +200,8 @@ class RiskManager:
         self,
         available_capital: float,
         current_price: float,
-        risk_per_trade_pct: float = 2.0
+        risk_per_trade_pct: float = 2.0,
+        side: str = 'long'
     ) -> float:
         """
         リスクベースでポジションサイズを計算
@@ -209,6 +210,7 @@ class RiskManager:
             available_capital: 利用可能資金
             current_price: 現在価格
             risk_per_trade_pct: 1トレードあたりのリスク（%）
+            side: 'long' または 'short'（デフォルト: 'long'）
 
         Returns:
             推奨ポジションサイズ（数量）
@@ -216,9 +218,15 @@ class RiskManager:
         # リスク額
         risk_amount = available_capital * (risk_per_trade_pct / 100)
 
-        # ストップロス幅
-        stop_loss_price = current_price * (1 - self.stop_loss_pct / 100)
-        risk_per_unit = current_price - stop_loss_price
+        # ストップロス幅（ロング/ショートに応じて計算）
+        if side == 'short':
+            # ショート: 価格が上がると損失
+            stop_loss_price = current_price * (1 + self.stop_loss_pct / 100)
+            risk_per_unit = stop_loss_price - current_price
+        else:
+            # ロング: 価格が下がると損失
+            stop_loss_price = current_price * (1 - self.stop_loss_pct / 100)
+            risk_per_unit = current_price - stop_loss_price
 
         # ポジションサイズ
         if risk_per_unit > 0:

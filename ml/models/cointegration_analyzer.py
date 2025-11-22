@@ -226,7 +226,11 @@ class CointegrationAnalyzer:
         mean = spread.rolling(window=window).mean()
         std = spread.rolling(window=window).std()
 
-        z_score = (spread - mean) / std
+        # 標準偏差がゼロの場合を処理（定数スプレッド）
+        # ゼロ除算を防ぐため、stdが0の場合はz-scoreを0とする
+        z_score = (spread - mean) / std.replace(0, np.nan)
+        z_score = z_score.fillna(0)
+
         return z_score
 
     def generate_signal(
@@ -250,6 +254,15 @@ class CointegrationAnalyzer:
         """
         spread = self.calculate_spread(price1, price2, hedge_ratio)
         z_score = self.calculate_z_score(spread, window)
+
+        # データが空の場合はhold
+        if len(spread) == 0 or len(z_score) == 0:
+            return SpreadSignal(
+                spread=0.0,
+                z_score=0.0,
+                signal='hold',
+                hedge_ratio=hedge_ratio
+            )
 
         current_spread = spread.iloc[-1]
         current_z = z_score.iloc[-1]

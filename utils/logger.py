@@ -132,6 +132,12 @@ def setup_logger(
     file_handler.addFilter(secret_filter)
     logger.addHandler(file_handler)
 
+    # ログファイルの権限を制限（オーナーのみ読み書き）
+    try:
+        os.chmod(log_path, 0o600)
+    except (OSError, FileNotFoundError):
+        pass  # ファイルが存在しない場合やWindows環境では無視
+
     # コンソールハンドラー（オプション）
     if console:
         console_handler = logging.StreamHandler(sys.stdout)

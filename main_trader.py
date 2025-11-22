@@ -121,15 +121,21 @@ class CryptoTrader:
             max_monthly_loss_pct=risk_config.get('max_monthly_loss_pct', 15.0)
         )
 
-        # ペアトレーディング戦略初期化
+        # ペアトレーディング戦略初期化（設定ファイルから読み込み）
+        pt_config = self.config.get('pair_trading', {})
         pair_trading_config = PairTradingConfig(
-            z_score_entry=2.0,
-            z_score_exit=0.5,
-            z_score_stop_loss=4.0,
-            position_size_pct=0.1,
-            take_profit_pct=0.03,
-            trailing_stop_pct=0.015,
-            min_profit_pct=0.005
+            z_score_entry=pt_config.get('z_score_entry', 2.0),
+            z_score_exit=pt_config.get('z_score_exit', 0.5),
+            z_score_stop_loss=pt_config.get('z_score_stop_loss', 4.0),
+            max_pairs=pt_config.get('max_pairs', 3),
+            position_size_pct=pt_config.get('position_size_pct', 0.1),
+            lookback_period=pt_config.get('lookback_period', 252),
+            rebalance_interval=pt_config.get('rebalance_interval', 24),
+            min_half_life=pt_config.get('min_half_life', 5.0),
+            max_half_life=pt_config.get('max_half_life', 60.0),
+            take_profit_pct=pt_config.get('take_profit_pct', 0.03),
+            trailing_stop_pct=pt_config.get('trailing_stop_pct', 0.015),
+            min_profit_pct=pt_config.get('min_profit_pct', 0.005)
         )
         self.pair_trading_strategy = PairTradingStrategy(config=pair_trading_config)
 
@@ -1277,8 +1283,12 @@ class CryptoTrader:
             logger.info(f"  設定上の初期資本: ¥{initial_capital:,.0f}")
             logger.info(f"  実際の取引所残高: ¥{total_balance:,.0f}")
 
-            # 差異を計算
-            difference_pct = abs(total_balance - initial_capital) / initial_capital * 100
+            # 差異を計算（ゼロ除算を防ぐ）
+            if initial_capital > 0:
+                difference_pct = abs(total_balance - initial_capital) / initial_capital * 100
+            else:
+                logger.error("  ✗ initial_capitalが0または未設定です")
+                return
 
             if difference_pct > 10:
                 logger.warning(f"  ⚠ 警告: 設定値と実残高に{difference_pct:.1f}%の差異があります")
