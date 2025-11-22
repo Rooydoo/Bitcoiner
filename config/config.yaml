@@ -62,6 +62,21 @@ strategy_allocation:
   trend_ratio: 0.50            # コイン資金のうちトレンド戦略に使う割合（50%）
   cointegration_ratio: 0.50    # コイン資金のうち共和分戦略に使う割合（50%）
 
+# ペアトレーディング設定
+pair_trading:
+  z_score_entry: 2.0           # エントリーz-scoreしきい値
+  z_score_exit: 0.5            # エグジットz-scoreしきい値
+  z_score_stop_loss: 4.0       # ストップロスz-scoreしきい値
+  max_pairs: 3                 # 最大ペア数
+  position_size_pct: 0.1       # ポジションサイズ（資金の10%）
+  lookback_period: 252         # ルックバック期間（日）
+  rebalance_interval: 24       # リバランス間隔（時間）
+  min_half_life: 5.0           # 最小半減期（日）
+  max_half_life: 60.0          # 最大半減期（日）
+  take_profit_pct: 0.03        # 利益確定（3%）
+  trailing_stop_pct: 0.015     # トレーリングストップ（1.5%）
+  min_profit_pct: 0.005        # 最小利益確保（0.5%）
+
 # Telegram通知設定（.envで設定推奨）
 telegram:
   enabled: true                # 通知有効化（APIキー設定時にtrue）
