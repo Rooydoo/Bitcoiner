@@ -1140,8 +1140,8 @@ class CryptoTrader:
 
                     # 約定チェック（完全約定または部分約定）
                     if filled_amount > 0:
-                        # 実際の約定価格を取得（ない場合は予定価格を使用）
-                        actual_price = order.get('price', current_price)
+                        # HIGH-3: 実際の約定価格を取得（averageを優先、なければprice、最終的にcurrent_price）
+                        actual_price = order.get('average') or order.get('price') or current_price
 
                         # 部分約定の警告
                         if filled_amount < requested_amount * 0.95:  # 95%未満なら部分約定
