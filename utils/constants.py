@@ -39,3 +39,15 @@ ORDER_FINAL_STATUSES = ['closed', 'filled', 'canceled']  # 注文が確定した
 
 # ========== ロールバック設定 ==========
 MAX_ROLLBACK_RETRIES = 3  # ペア取引ロールバックの最大リトライ回数
+
+# ========== トレーディング方向 ==========
+SIDE_LONG = 'long'
+SIDE_SHORT = 'short'
+
+# ========== 注文タイプ ==========
+ORDER_BUY = 'buy'
+ORDER_SELL = 'sell'
+
+# ========== ペア取引方向 ==========
+PAIR_LONG_SPREAD = 'long_spread'  # symbol1買い、symbol2売り
+PAIR_SHORT_SPREAD = 'short_spread'  # symbol1売り、symbol2買い

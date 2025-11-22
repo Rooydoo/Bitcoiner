@@ -57,7 +57,13 @@ from utils.constants import (
     ORDER_SUCCESS_STATUSES,
     ORDER_FINAL_STATUSES,
     MAX_ROLLBACK_RETRIES,
-    MAX_CONSECUTIVE_API_ERRORS
+    MAX_CONSECUTIVE_API_ERRORS,
+    SIDE_LONG,
+    SIDE_SHORT,
+    ORDER_BUY,
+    ORDER_SELL,
+    PAIR_LONG_SPREAD,
+    PAIR_SHORT_SPREAD
 )
 
 # ロガー設定
@@ -750,9 +756,9 @@ class CryptoTrader:
 
             # ========== 新規エントリー判定 ==========
             if signal['signal'] == 'BUY':
-                self._enter_new_position(symbol, 'long', current_price, signal)
+                self._enter_new_position(symbol, SIDE_LONG, current_price, signal)
             elif signal['signal'] == 'SELL':
-                self._enter_new_position(symbol, 'short', current_price, signal)
+                self._enter_new_position(symbol, SIDE_SHORT, current_price, signal)
             else:
                 logger.debug(f"{symbol} HOLD - エントリーなし")
 
@@ -1108,7 +1114,7 @@ class CryptoTrader:
                 try:
                     order = self.order_executor.create_market_order(
                         symbol,
-                        'buy' if side == 'long' else 'sell',
+                        ORDER_BUY if side == SIDE_LONG else ORDER_SELL,
                         quantity
                     )
 
@@ -1285,7 +1291,7 @@ class CryptoTrader:
             # 注文実行（部分決済）
             order = self.order_executor.create_market_order(
                 symbol,
-                'sell' if position.side == 'long' else 'buy',
+                ORDER_SELL if position.side == SIDE_LONG else ORDER_BUY,
                 partial_quantity
             )
 
@@ -1339,7 +1345,7 @@ class CryptoTrader:
             # 注文実行
             order = self.order_executor.create_market_order(
                 symbol,
-                'sell' if position.side == 'long' else 'buy',
+                ORDER_SELL if position.side == SIDE_LONG else ORDER_BUY,
                 position.quantity
             )
 
