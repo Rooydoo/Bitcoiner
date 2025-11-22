@@ -53,7 +53,9 @@ from utils.constants import (
     POSITION_RECONCILE_CYCLES,
     WAL_CHECKPOINT_CYCLES,
     DB_CONNECTION_REFRESH_CYCLES,
-    ORDER_STATUS_RETRY_DELAYS
+    ORDER_STATUS_RETRY_DELAYS,
+    ORDER_SUCCESS_STATUSES,
+    ORDER_FINAL_STATUSES
 )
 
 # ロガー設定
@@ -1137,7 +1139,7 @@ class CryptoTrader:
                                     logger.info(f"    → 状態: {status}")
 
                                     # 確定状態なら成功
-                                    if status in ['closed', 'filled', 'canceled']:
+                                    if status in ORDER_FINAL_STATUSES:
                                         logger.info(f"  ✓ 注文状態確定: {status}")
                                         order = order_status
                                         break  # ループ脱出
@@ -1160,7 +1162,7 @@ class CryptoTrader:
                                         return
 
                             # ループ後も状態が確定していない場合
-                            if not order_status or order_status.get('status') not in ['closed', 'filled', 'canceled']:
+                            if not order_status or order_status.get('status') not in ORDER_FINAL_STATUSES:
                                 logger.error(f"  ✗ タイムアウト後も注文状態が確定せず")
                                 self.db_manager.update_position(
                                     pending_position.position_id,
@@ -1286,7 +1288,7 @@ class CryptoTrader:
             )
 
             # HIGH-4: order status field validation
-            if order and order.get('status') in ['closed', 'filled']:
+            if order and order.get('status') in ORDER_SUCCESS_STATUSES:
                 # ポジションマネージャーで部分決済処理
                 partial_info = self.position_manager.partial_close_position(
                     symbol,
@@ -1340,7 +1342,7 @@ class CryptoTrader:
             )
 
             # HIGH-4: order status field validation
-            if order and order.get('status') in ['closed', 'filled']:
+            if order and order.get('status') in ORDER_SUCCESS_STATUSES:
                 # ポジションクローズ
                 closed_position = self.position_manager.close_position(symbol, exit_price)
 
@@ -1548,7 +1550,7 @@ class CryptoTrader:
                         # short_spread: symbol1を売り、symbol2を買い
                         order1 = self.order_executor.create_market_order(position.symbol1, 'sell', position.size1)
 
-                    if not order1 or order1.get('status') not in ['closed', 'filled']:
+                    if not order1 or order1.get('status') not in ORDER_SUCCESS_STATUSES:
                         logger.error(f"      ✗ {position.symbol1} 注文失敗")
                         orders_success = False
 
@@ -1561,7 +1563,7 @@ class CryptoTrader:
                             # short_spread: symbol2を買い
                             order2 = self.order_executor.create_market_order(position.symbol2, 'buy', position.size2)
 
-                        if not order2 or order2.get('status') not in ['closed', 'filled']:
+                        if not order2 or order2.get('status') not in ORDER_SUCCESS_STATUSES:
                             logger.error(f"      ✗ {position.symbol2} 注文失敗")
                             orders_success = False
 
@@ -1588,7 +1590,7 @@ class CryptoTrader:
                                         position.size1
                                     )
 
-                                    if rollback_order and rollback_order.get('status') in ['closed', 'filled']:
+                                    if rollback_order and rollback_order.get('status') in ORDER_SUCCESS_STATUSES:
                                         logger.warning(f"      ✓ ロールバック成功（試行{retry_attempt+1}回目）: {position.symbol1} {rollback_side}")
                                         rollback_success = True
 
@@ -1721,7 +1723,7 @@ class CryptoTrader:
                 # short_spread時にsymbol1を売っていた → 買い戻し
                 order1 = self.order_executor.create_market_order(position.symbol1, 'buy', position.size1)
 
-            if not order1 or order1.get('status') not in ['closed', 'filled']:
+            if not order1 or order1.get('status') not in ORDER_SUCCESS_STATUSES:
                 logger.error(f"      ✗ {position.symbol1} 決済注文失敗")
                 orders_success = False
 
@@ -1734,7 +1736,7 @@ class CryptoTrader:
                     # short_spread時にsymbol2を買っていた → 売却
                     order2 = self.order_executor.create_market_order(position.symbol2, 'sell', position.size2)
 
-                if not order2 or order2.get('status') not in ['closed', 'filled']:
+                if not order2 or order2.get('status') not in ORDER_SUCCESS_STATUSES:
                     logger.error(f"      ✗ {position.symbol2} 決済注文失敗")
                     orders_success = False
 
@@ -1766,7 +1768,7 @@ class CryptoTrader:
                                 position.size1
                             )
 
-                            if rollback_order and rollback_order.get('status') in ['closed', 'filled']:
+                            if rollback_order and rollback_order.get('status') in ORDER_SUCCESS_STATUSES:
                                 logger.warning(f"      ✓ ロールバック成功（試行{retry_attempt+1}回目）: {position.symbol1} {rollback_side}")
                                 logger.warning(f"         → ヘッジ状態を復元しました")
                                 rollback_success = True
