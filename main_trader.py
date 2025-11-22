@@ -30,6 +30,7 @@ from ml.models.ensemble_model import EnsembleModel
 from trading.order_executor import OrderExecutor
 from trading.position_manager import PositionManager
 from trading.risk_manager import RiskManager
+from trading.strategy.pair_trading_strategy import PairTradingStrategy, PairTradingConfig, PairPosition
 
 # Phase 4: Reporting & Notification
 from notification.telegram_notifier import TelegramNotifier
@@ -119,7 +120,30 @@ class CryptoTrader:
             max_weekly_loss_pct=risk_config.get('max_weekly_loss_pct', 10.0),
             max_monthly_loss_pct=risk_config.get('max_monthly_loss_pct', 15.0)
         )
-        logger.info("  ✓ 注文実行、ポジション管理、リスク管理モジュール初期化完了")
+
+        # ペアトレーディング戦略初期化
+        pair_trading_config = PairTradingConfig(
+            z_score_entry=2.0,
+            z_score_exit=0.5,
+            z_score_stop_loss=4.0,
+            position_size_pct=0.1,
+            take_profit_pct=0.03,
+            trailing_stop_pct=0.015,
+            min_profit_pct=0.005
+        )
+        self.pair_trading_strategy = PairTradingStrategy(config=pair_trading_config)
+
+        # DBからオープン中のペアポジションを復元
+        self._restore_pair_positions()
+
+        # 戦略配分設定
+        self.strategy_allocation = self.config.get('strategy_allocation', {
+            'crypto_ratio': 0.5,
+            'trend_ratio': 0.5,
+            'cointegration_ratio': 0.5
+        })
+
+        logger.info("  ✓ 注文実行、ポジション管理、リスク管理、ペアトレーディングモジュール初期化完了")
 
         # Phase 4: レポート・通知初期化
         logger.info("\n[Phase 4] レポート・通知初期化")
@@ -172,6 +196,50 @@ class CryptoTrader:
                 all_exist = False
 
         return all_exist
+
+    def _restore_pair_positions(self):
+        """DBからオープン中のペアポジションを復元"""
+        try:
+            open_positions = self.db_manager.get_open_pair_positions()
+
+            if not open_positions:
+                logger.info("  復元するペアポジションはありません")
+                return
+
+            restored_count = 0
+            for pos_data in open_positions:
+                try:
+                    position = PairPosition(
+                        pair_id=pos_data['pair_id'],
+                        symbol1=pos_data['symbol1'],
+                        symbol2=pos_data['symbol2'],
+                        direction=pos_data['direction'],
+                        hedge_ratio=pos_data['hedge_ratio'],
+                        entry_spread=pos_data['entry_spread'],
+                        entry_z_score=pos_data['entry_z_score'],
+                        entry_time=datetime.fromtimestamp(pos_data['entry_time']),
+                        size1=pos_data['size1'],
+                        size2=pos_data['size2'],
+                        entry_price1=pos_data['entry_price1'],
+                        entry_price2=pos_data['entry_price2'],
+                        unrealized_pnl=pos_data.get('unrealized_pnl', 0.0),
+                        max_pnl=pos_data.get('max_pnl', 0.0),
+                        entry_capital=pos_data['entry_capital']
+                    )
+
+                    self.pair_trading_strategy.positions[position.pair_id] = position
+                    restored_count += 1
+
+                    logger.info(f"  ✓ ペアポジション復元: {position.pair_id}")
+
+                except Exception as e:
+                    logger.error(f"  ✗ ポジション復元エラー: {pos_data.get('pair_id', 'unknown')} - {e}")
+
+            if restored_count > 0:
+                logger.info(f"  ✓ {restored_count}件のペアポジションを復元しました")
+
+        except Exception as e:
+            logger.error(f"ペアポジション復元エラー: {e}")
 
     def _train_initial_models(self):
         """初回起動時のモデル学習"""
@@ -340,7 +408,7 @@ class CryptoTrader:
             return None
 
     def generate_trading_signal(self, symbol: str) -> Optional[Dict]:
-        """取引シグナル生成
+        """取引シグナル生成（トレンド戦略用）
 
         Args:
             symbol: 取引ペア
@@ -357,22 +425,37 @@ class CryptoTrader:
             df = self.collect_and_store_data(symbol, limit=500)
 
             if df is None or len(df) < 100:
-                logger.warning(f"{symbol} データ不足")
+                logger.warning(f"{symbol} データ不足（最低100件必要）")
                 return None
 
             # 特徴量生成
-            df = self.feature_engineer.create_all_features(df)
-            df = df.dropna()
+            try:
+                df = self.feature_engineer.create_all_features(df)
+                original_len = len(df)
+                df = df.dropna()
 
-            if len(df) == 0:
-                logger.warning(f"{symbol} 特徴量生成後データなし")
+                if len(df) == 0:
+                    logger.warning(f"{symbol} 特徴量生成後データなし（NaN除去前: {original_len}件）")
+                    return None
+
+                if len(df) < 50:
+                    logger.warning(f"{symbol} 特徴量生成後データ不足（{len(df)}件 < 50件）")
+                    return None
+
+            except Exception as fe_error:
+                logger.error(f"{symbol} 特徴量エンジニアリングエラー: {fe_error}")
                 return None
 
             # アンサンブルモデルで予測
-            signal = self.ensemble_model.generate_trading_signal(
-                df,
-                confidence_threshold=self.config.get('trading', {}).get('min_confidence', 0.6)
-            )
+            try:
+                signal = self.ensemble_model.generate_trading_signal(
+                    df,
+                    confidence_threshold=self.config.get('trading', {}).get('min_confidence', 0.6)
+                )
+            except Exception as model_error:
+                logger.error(f"{symbol} モデル予測エラー: {model_error}")
+                # フォールバック: HOLDシグナル
+                return {'signal': 'HOLD', 'confidence': 0.0, 'error': str(model_error)}
 
             logger.info(f"  ✓ {symbol} シグナル: {signal['signal']} (信頼度: {signal['confidence']:.2%})")
 
@@ -459,7 +542,45 @@ class CryptoTrader:
                 # 部分決済を実行
                 self._partial_close_position(symbol, current_price, close_ratio, level, unrealized_pnl_pct)
 
-    def _enter_new_position(self, symbol: str, side: str, current_price: float, signal: Dict):
+    def _get_available_capital(self, strategy_type: str = 'trend') -> float:
+        """利用可能資金を取得（戦略配分を考慮）
+
+        Args:
+            strategy_type: 'trend' or 'cointegration'
+
+        Returns:
+            利用可能資金
+        """
+        try:
+            balance = self.order_executor.get_balance('JPY')
+            total_free = balance.get('free', 0)
+
+            if total_free <= 0:
+                logger.warning("利用可能残高がありません")
+                return 0.0
+
+            # 戦略配分を適用
+            alloc = self.config.get('strategy_allocation', {})
+            crypto_ratio = alloc.get('crypto_ratio', 0.5)
+
+            # コイン投資に割り当てられた資金
+            crypto_capital = total_free * crypto_ratio
+
+            # 戦略タイプに応じた配分
+            if strategy_type == 'trend':
+                trend_ratio = alloc.get('trend_ratio', 0.5)
+                return crypto_capital * trend_ratio
+            elif strategy_type == 'cointegration':
+                coint_ratio = alloc.get('cointegration_ratio', 0.5)
+                return crypto_capital * coint_ratio
+            else:
+                return crypto_capital
+
+        except Exception as e:
+            logger.error(f"残高取得エラー: {e}")
+            return 0.0
+
+    def _enter_new_position(self, symbol: str, side: str, current_price: float, signal: Dict, strategy_type: str = 'trend'):
         """新規ポジションエントリー
 
         Args:
@@ -467,6 +588,7 @@ class CryptoTrader:
             side: 'long' or 'short'
             current_price: 現在価格
             signal: シグナル情報
+            strategy_type: 戦略タイプ（'trend' or 'cointegration'）
         """
         try:
             # ポジション数制限チェック
@@ -477,9 +599,12 @@ class CryptoTrader:
                 logger.info(f"  {symbol} エントリー見送り: 最大ポジション数到達（{current_positions}/{max_positions}）")
                 return
 
-            # 資産情報取得
-            balance = self.order_executor.get_balance('JPY')
-            available_capital = balance['free']
+            # 資産情報取得（戦略配分を考慮）
+            available_capital = self._get_available_capital(strategy_type)
+
+            if available_capital <= 0:
+                logger.warning(f"  {symbol} エントリー見送り: 利用可能資金なし")
+                return
 
             # エントリー可否チェック
             should_enter, reason = self.risk_manager.should_enter_trade(
@@ -668,6 +793,317 @@ class CryptoTrader:
             logger.error(f"{symbol} クローズエラー: {e}")
             logger.error(traceback.format_exc())
 
+    def run_cointegration_trading(self):
+        """共和分（ペアトレーディング）の取引処理"""
+        alloc = self.config.get('strategy_allocation', {})
+        coint_ratio = alloc.get('cointegration_ratio', 0.5)
+
+        if coint_ratio <= 0:
+            logger.debug("共和分戦略は無効（配分0%）")
+            return
+
+        logger.info("\n[共和分戦略] 処理開始")
+
+        try:
+            # 価格データ収集（ペアトレーディング用）
+            symbols = [p['symbol'] for p in self.trading_pairs]
+            price_data = {}
+
+            for symbol in symbols:
+                df = self.collect_and_store_data(symbol, timeframe='1h', limit=300)
+                if df is not None and len(df) > 0:
+                    price_data[symbol] = df['close']
+
+            if len(price_data) < 2:
+                logger.warning("  共和分分析に必要なデータが不足")
+                return
+
+            # 共和分ペアを更新
+            self.pair_trading_strategy.update_cointegration(price_data)
+
+            if not self.pair_trading_strategy.cointegrated_pairs:
+                logger.info("  共和分ペアが見つかりませんでした")
+                return
+
+            # シグナル生成
+            signals = self.pair_trading_strategy.generate_signals(price_data)
+
+            # 現在価格を収集（未実現損益更新用）
+            current_prices = {}
+            for symbol in symbols:
+                price = self.order_executor.get_current_price(symbol)
+                if price:
+                    current_prices[symbol] = price
+
+            # 未実現損益を更新
+            self.pair_trading_strategy.update_unrealized_pnl(current_prices)
+
+            # 既存ポジションの管理
+            for pair_id, position in list(self.pair_trading_strategy.positions.items()):
+                if pair_id in signals:
+                    signal = signals[pair_id]
+                    price1 = current_prices.get(position.symbol1)
+                    price2 = current_prices.get(position.symbol2)
+
+                    if price1 and price2:
+                        # エグジット判定
+                        should_exit, reason = self.pair_trading_strategy.should_exit(signal, position)
+                        if should_exit:
+                            logger.info(f"  ペアポジションクローズ: {pair_id} ({reason})")
+                            self._close_pair_position(position, price1, price2, reason)
+
+            # 新規エントリー判定
+            for pair in self.pair_trading_strategy.cointegrated_pairs:
+                pair_id = f"{pair.symbol1}_{pair.symbol2}"
+
+                if pair_id not in signals:
+                    continue
+
+                signal = signals[pair_id]
+
+                if self.pair_trading_strategy.should_enter(signal, pair_id):
+                    price1 = self.order_executor.get_current_price(pair.symbol1)
+                    price2 = self.order_executor.get_current_price(pair.symbol2)
+
+                    if price1 and price2:
+                        available_capital = self._get_available_capital('cointegration')
+                        if available_capital > 0:
+                            logger.info(f"  ペアエントリー: {pair_id} ({signal.signal})")
+                            self._enter_pair_position(pair, signal, price1, price2, available_capital)
+
+            logger.info("  ✓ 共和分戦略処理完了")
+
+        except Exception as e:
+            logger.error(f"共和分取引エラー: {e}")
+            logger.error(traceback.format_exc())
+
+    def _enter_pair_position(self, pair, signal, price1: float, price2: float, capital: float):
+        """ペアポジションエントリー"""
+        try:
+            position = self.pair_trading_strategy.open_position(
+                pair, signal, price1, price2, capital
+            )
+
+            if position:
+                logger.info(f"    ✓ ペアポジション開始: {position.pair_id}")
+                logger.info(f"      {position.symbol1}: {position.size1:.6f}")
+                logger.info(f"      {position.symbol2}: {position.size2:.6f}")
+
+                # 残高チェック（空売り防止）
+                symbol1_base = position.symbol1.split('/')[0]  # BTC/JPY -> BTC
+                symbol2_base = position.symbol2.split('/')[0]  # ETH/JPY -> ETH
+
+                balance_ok = True
+
+                if position.direction == 'long_spread':
+                    # symbol1買い、symbol2売り
+                    # symbol2の保有量をチェック
+                    balance2 = self.order_executor.get_balance(symbol2_base)
+                    available2 = balance2.get('free', 0)
+
+                    if available2 < position.size2:
+                        logger.error(f"      ✗ {symbol2_base} 残高不足: 必要{position.size2:.6f}, 保有{available2:.6f}")
+                        balance_ok = False
+                else:
+                    # symbol1売り、symbol2買い
+                    # symbol1の保有量をチェック
+                    balance1 = self.order_executor.get_balance(symbol1_base)
+                    available1 = balance1.get('free', 0)
+
+                    if available1 < position.size1:
+                        logger.error(f"      ✗ {symbol1_base} 残高不足: 必要{position.size1:.6f}, 保有{available1:.6f}")
+                        balance_ok = False
+
+                if not balance_ok:
+                    logger.error(f"      ✗ 残高不足のためペアエントリー中止")
+                    # ポジションを削除
+                    if position.pair_id in self.pair_trading_strategy.positions:
+                        del self.pair_trading_strategy.positions[position.pair_id]
+                    return
+
+                # 実際の注文実行
+                orders_success = True
+
+                # 注文1: symbol1
+                if position.direction == 'long_spread':
+                    # long_spread: symbol1を買い、symbol2を売り
+                    order1 = self.order_executor.create_market_order(position.symbol1, 'buy', position.size1)
+                else:
+                    # short_spread: symbol1を売り、symbol2を買い
+                    order1 = self.order_executor.create_market_order(position.symbol1, 'sell', position.size1)
+
+                if not order1 or order1.get('status') not in ['closed', 'filled']:
+                    logger.error(f"      ✗ {position.symbol1} 注文失敗")
+                    orders_success = False
+
+                # 注文2: symbol2
+                if orders_success:
+                    if position.direction == 'long_spread':
+                        # long_spread: symbol2を売り
+                        order2 = self.order_executor.create_market_order(position.symbol2, 'sell', position.size2)
+                    else:
+                        # short_spread: symbol2を買い
+                        order2 = self.order_executor.create_market_order(position.symbol2, 'buy', position.size2)
+
+                    if not order2 or order2.get('status') not in ['closed', 'filled']:
+                        logger.error(f"      ✗ {position.symbol2} 注文失敗")
+                        orders_success = False
+
+                # 両方成功した場合のみDB保存と通知
+                if orders_success:
+                    logger.info(f"      ✓ 両方の注文実行成功")
+
+                    # データベースに永続化
+                    try:
+                        self.db_manager.create_pair_position({
+                            'pair_id': position.pair_id,
+                            'symbol1': position.symbol1,
+                            'symbol2': position.symbol2,
+                            'direction': position.direction,
+                            'hedge_ratio': position.hedge_ratio,
+                            'entry_spread': position.entry_spread,
+                            'entry_z_score': position.entry_z_score,
+                            'entry_time': int(position.entry_time.timestamp()),
+                            'size1': position.size1,
+                            'size2': position.size2,
+                            'entry_price1': position.entry_price1,
+                            'entry_price2': position.entry_price2,
+                            'entry_capital': position.entry_capital
+                        })
+                    except Exception as db_error:
+                        logger.error(f"      ✗ DB保存失敗: {db_error}")
+                        # メモリからもポジションを削除
+                        if position.pair_id in self.pair_trading_strategy.positions:
+                            del self.pair_trading_strategy.positions[position.pair_id]
+                        # エラー通知
+                        self.notifier.notify_error(
+                            'ペアポジションDB保存失敗',
+                            f'ペア {position.pair_id} のDB保存に失敗しました。\n'
+                            f'注文は実行済みのため、手動で取引所を確認してください。\n'
+                            f'エラー: {db_error}'
+                        )
+                        return
+
+                    # Telegram通知
+                    self.notifier.notify_pair_trade_open(
+                        pair_id=position.pair_id,
+                        symbol1=position.symbol1,
+                        symbol2=position.symbol2,
+                        direction=position.direction,
+                        size1=position.size1,
+                        size2=position.size2,
+                        price1=price1,
+                        price2=price2,
+                        z_score=signal.z_score,
+                        hedge_ratio=signal.hedge_ratio
+                    )
+                else:
+                    # 注文失敗時はポジションを削除
+                    logger.error(f"      ✗ 注文失敗のためポジション削除")
+                    if position.pair_id in self.pair_trading_strategy.positions:
+                        del self.pair_trading_strategy.positions[position.pair_id]
+
+        except Exception as e:
+            logger.error(f"ペアエントリーエラー: {e}")
+            logger.error(traceback.format_exc())
+
+    def _close_pair_position(self, position, price1: float, price2: float, reason: str):
+        """ペアポジションクローズ"""
+        try:
+            # 保有期間計算
+            hold_duration = None
+            if hasattr(position, 'entry_time') and position.entry_time:
+                duration = datetime.now() - position.entry_time
+                hours = int(duration.total_seconds() // 3600)
+                minutes = int((duration.total_seconds() % 3600) // 60)
+                hold_duration = f"{hours}時間{minutes}分"
+
+            # 実際の決済注文実行
+            logger.info(f"    ペアポジション決済開始: {position.pair_id}")
+            orders_success = True
+
+            # 注文1: symbol1を決済
+            if position.direction == 'long_spread':
+                # long_spread時にsymbol1を買っていた → 売却
+                order1 = self.order_executor.create_market_order(position.symbol1, 'sell', position.size1)
+            else:
+                # short_spread時にsymbol1を売っていた → 買い戻し
+                order1 = self.order_executor.create_market_order(position.symbol1, 'buy', position.size1)
+
+            if not order1 or order1.get('status') not in ['closed', 'filled']:
+                logger.error(f"      ✗ {position.symbol1} 決済注文失敗")
+                orders_success = False
+
+            # 注文2: symbol2を決済
+            if orders_success:
+                if position.direction == 'long_spread':
+                    # long_spread時にsymbol2を売っていた → 買い戻し
+                    order2 = self.order_executor.create_market_order(position.symbol2, 'buy', position.size2)
+                else:
+                    # short_spread時にsymbol2を買っていた → 売却
+                    order2 = self.order_executor.create_market_order(position.symbol2, 'sell', position.size2)
+
+                if not order2 or order2.get('status') not in ['closed', 'filled']:
+                    logger.error(f"      ✗ {position.symbol2} 決済注文失敗")
+                    orders_success = False
+
+            # 両方の決済注文が成功した場合のみ処理を続行
+            if not orders_success:
+                logger.error(f"      ✗ ペアポジション決済失敗: {position.pair_id}")
+                logger.error(f"      一部注文のみ成功の可能性あり - 手動確認が必要です")
+                self.notifier.notify_error(
+                    'ペアポジション決済エラー',
+                    f'ペア {position.pair_id} の決済注文が失敗しました。取引所で状態を確認してください。'
+                )
+                return
+
+            # 決済成功 - メモリから削除、損益計算
+            logger.info(f"      ✓ 両方の決済注文実行成功")
+
+            closed_position, pnl = self.pair_trading_strategy.close_position(
+                position.pair_id, price1, price2, reason
+            )
+
+            logger.info(f"    ✓ ペアポジション終了: {position.pair_id}")
+            logger.info(f"      損益: ¥{pnl:,.0f} ({reason})")
+
+            # データベースに永続化
+            try:
+                self.db_manager.close_pair_position(position.pair_id, {
+                    'exit_price1': price1,
+                    'exit_price2': price2,
+                    'exit_time': int(datetime.now().timestamp()),
+                    'exit_reason': reason,
+                    'realized_pnl': pnl
+                })
+            except Exception as db_error:
+                logger.error(f"      ✗ DB更新失敗（決済記録）: {db_error}")
+                # 決済自体は成功しているので、エラー通知のみ
+                self.notifier.notify_error(
+                    'ペアポジション決済DB更新失敗',
+                    f'ペア {position.pair_id} の決済記録の保存に失敗しました。\n'
+                    f'決済は正常に完了していますが、DB記録が不完全です。\n'
+                    f'エラー: {db_error}'
+                )
+
+            # リスク管理に記録
+            initial_capital = self.config.get('trading', {}).get('initial_capital', 200000)
+            self.risk_manager.record_trade_result(pnl, initial_capital)
+
+            # Telegram通知
+            self.notifier.notify_pair_trade_close(
+                pair_id=position.pair_id,
+                symbol1=position.symbol1,
+                symbol2=position.symbol2,
+                pnl=pnl,
+                reason=reason,
+                hold_duration=hold_duration
+            )
+
+        except Exception as e:
+            logger.error(f"ペアクローズエラー: {e}")
+            logger.error(traceback.format_exc())
+
     def run_trading_cycle(self):
         """1サイクルの取引処理"""
         logger.info("\n" + "=" * 70)
@@ -681,21 +1117,36 @@ class CryptoTrader:
                 "一時停止から24時間経過したため、取引を自動的に再開しました。"
             )
 
+        # 戦略配分を取得
+        alloc = self.config.get('strategy_allocation', {})
+        trend_ratio = alloc.get('trend_ratio', 0.5)
+        coint_ratio = alloc.get('cointegration_ratio', 0.5)
+
         try:
-            # 各取引ペアで処理
-            for pair_config in self.trading_pairs:
-                symbol = pair_config['symbol']
+            # ========== トレンド戦略 ==========
+            if trend_ratio > 0:
+                logger.info("\n[トレンド戦略] 処理開始")
+                for pair_config in self.trading_pairs:
+                    symbol = pair_config['symbol']
 
-                logger.info(f"\n[{symbol}] 処理開始")
+                    logger.info(f"\n  [{symbol}] 処理中")
 
-                # シグナル生成
-                signal = self.generate_trading_signal(symbol)
+                    # シグナル生成
+                    signal = self.generate_trading_signal(symbol)
 
-                if signal:
-                    # 取引判断・実行
-                    self.execute_trading_decision(symbol, signal)
-                else:
-                    logger.debug(f"  {symbol} シグナルなし")
+                    if signal:
+                        # 取引判断・実行
+                        self.execute_trading_decision(symbol, signal)
+                    else:
+                        logger.debug(f"    {symbol} シグナルなし")
+            else:
+                logger.info("\n[トレンド戦略] 無効（配分0%）")
+
+            # ========== 共和分戦略 ==========
+            if coint_ratio > 0:
+                self.run_cointegration_trading()
+            else:
+                logger.info("\n[共和分戦略] 無効（配分0%）")
 
             logger.info("\n" + "=" * 70)
             logger.info("取引サイクル完了")

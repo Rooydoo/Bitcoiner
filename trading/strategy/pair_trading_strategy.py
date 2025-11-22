@@ -172,6 +172,11 @@ class PairTradingStrategy:
         # 資産2のサイズ（ヘッジ比率を考慮）
         size2 = size1 * pair.hedge_ratio * (price1 / price2)
 
+        # 精度調整（bitFlyer仕様に合わせて8桁に丸める）
+        # BTC/ETHなどの暗号資産は通常8桁まで対応
+        size1 = round(size1, 8)
+        size2 = round(size2, 8)
+
         return size1, size2
 
     def should_enter(self, signal: SpreadSignal, pair_id: str) -> bool:

@@ -6,6 +6,7 @@
 import logging
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 from statsmodels.tsa.stattools import coint, adfuller
@@ -37,6 +38,14 @@ class SpreadSignal:
     hedge_ratio: float
 
 
+@dataclass
+class CachedCointegrationResult:
+    """キャッシュされた共和分結果"""
+    result: CointegrationResult
+    cached_at: datetime
+    expires_at: datetime
+
+
 class CointegrationAnalyzer:
     """共和分分析クラス"""
 
@@ -45,7 +54,8 @@ class CointegrationAnalyzer:
         significance_level: float = 0.05,
         lookback_period: int = 252,
         z_score_entry: float = 2.0,
-        z_score_exit: float = 0.5
+        z_score_exit: float = 0.5,
+        cache_days: int = 7
     ):
         """
         初期化
@@ -55,16 +65,21 @@ class CointegrationAnalyzer:
             lookback_period: ルックバック期間（日数）
             z_score_entry: エントリーZスコア閾値
             z_score_exit: エグジットZスコア閾値
+            cache_days: キャッシュ有効期間（日数、デフォルト7日）
         """
         self.significance_level = significance_level
         self.lookback_period = lookback_period
         self.z_score_entry = z_score_entry
         self.z_score_exit = z_score_exit
+        self.cache_days = cache_days
+
+        # キャッシュ: {pair_key: CachedCointegrationResult}
+        self._cache: Dict[str, CachedCointegrationResult] = {}
 
         logger.info(
             f"CointegrationAnalyzer初期化: "
             f"significance={significance_level}, lookback={lookback_period}, "
-            f"z_entry={z_score_entry}, z_exit={z_score_exit}"
+            f"z_entry={z_score_entry}, z_exit={z_score_exit}, cache_days={cache_days}"
         )
 
     def test_cointegration(
@@ -256,29 +271,81 @@ class CointegrationAnalyzer:
             hedge_ratio=hedge_ratio
         )
 
+    def _get_pair_key(self, sym1: str, sym2: str) -> str:
+        """ペアのキャッシュキーを生成（順序を正規化）"""
+        return f"{min(sym1, sym2)}_{max(sym1, sym2)}"
+
+    def _get_cached_result(self, pair_key: str) -> Optional[CointegrationResult]:
+        """キャッシュから結果を取得（有効期限チェック付き）"""
+        if pair_key not in self._cache:
+            return None
+
+        cached = self._cache[pair_key]
+        if datetime.now() >= cached.expires_at:
+            del self._cache[pair_key]
+            logger.debug(f"キャッシュ期限切れ: {pair_key}")
+            return None
+
+        logger.debug(f"キャッシュヒット: {pair_key}")
+        return cached.result
+
+    def _cache_result(self, pair_key: str, result: CointegrationResult):
+        """結果をキャッシュに保存"""
+        now = datetime.now()
+        self._cache[pair_key] = CachedCointegrationResult(
+            result=result,
+            cached_at=now,
+            expires_at=now + timedelta(days=self.cache_days)
+        )
+        logger.debug(f"キャッシュ保存: {pair_key} (有効期限: {self.cache_days}日)")
+
+    def clear_cache(self):
+        """キャッシュをクリア"""
+        self._cache.clear()
+        logger.info("共和分キャッシュをクリアしました")
+
     def find_cointegrated_pairs(
         self,
-        price_data: Dict[str, pd.Series]
+        price_data: Dict[str, pd.Series],
+        force_refresh: bool = False
     ) -> List[CointegrationResult]:
         """
         全ペアの共和分検定を実行し、共和分関係にあるペアを返す
 
         Args:
             price_data: {シンボル: 価格系列}の辞書
+            force_refresh: キャッシュを無視して再計算
 
         Returns:
             共和分関係にあるペアのリスト
         """
         symbols = list(price_data.keys())
         cointegrated_pairs = []
+        cache_hits = 0
+        cache_misses = 0
 
         for i in range(len(symbols)):
             for j in range(i + 1, len(symbols)):
                 sym1, sym2 = symbols[i], symbols[j]
+                pair_key = self._get_pair_key(sym1, sym2)
+
+                # キャッシュチェック
+                if not force_refresh:
+                    cached_result = self._get_cached_result(pair_key)
+                    if cached_result:
+                        cache_hits += 1
+                        if cached_result.is_cointegrated:
+                            cointegrated_pairs.append(cached_result)
+                        continue
+
+                cache_misses += 1
                 price1, price2 = price_data[sym1], price_data[sym2]
 
                 try:
                     result = self.test_cointegration(price1, price2, sym1, sym2)
+
+                    # キャッシュに保存
+                    self._cache_result(pair_key, result)
 
                     if result.is_cointegrated:
                         cointegrated_pairs.append(result)
@@ -287,7 +354,11 @@ class CointegrationAnalyzer:
                 except Exception as e:
                     logger.warning(f"共和分検定エラー: {sym1}/{sym2} - {e}")
 
-        logger.info(f"共和分ペア数: {len(cointegrated_pairs)}/{len(symbols) * (len(symbols) - 1) // 2}")
+        total_pairs = len(symbols) * (len(symbols) - 1) // 2
+        logger.info(
+            f"共和分ペア数: {len(cointegrated_pairs)}/{total_pairs} "
+            f"(キャッシュ: {cache_hits}件, 計算: {cache_misses}件)"
+        )
         return cointegrated_pairs
 
     def test_stationarity(self, series: pd.Series) -> Tuple[bool, float]:

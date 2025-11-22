@@ -50,6 +50,7 @@ class ConfigValidator:
         self._validate_risk_management()
         self._validate_trading_pairs()
         self._validate_ml_config()
+        self._validate_strategy_allocation()
 
         is_valid = len(self.errors) == 0
         return is_valid, self.errors, self.warnings
@@ -188,6 +189,56 @@ class ConfigValidator:
             self.errors.append(f"machine_learning.lightgbm.num_threads は1以上で設定してください: {num_threads}")
         elif num_threads and num_threads > 16:
             self.warnings.append(f"machine_learning.lightgbm.num_threads が多すぎます: {num_threads}")
+
+    def _validate_strategy_allocation(self):
+        """戦略配分設定の検証"""
+        alloc = self.config.get('strategy_allocation', {})
+
+        if not alloc:
+            self.warnings.append("strategy_allocation が設定されていません（デフォルト値使用）")
+            return
+
+        # crypto_ratio検証
+        crypto_ratio = alloc.get('crypto_ratio')
+        if crypto_ratio is not None:
+            if not (0.0 <= crypto_ratio <= 1.0):
+                self.errors.append(
+                    f"strategy_allocation.crypto_ratio は0.0-1.0の範囲で設定してください: {crypto_ratio}"
+                )
+            elif crypto_ratio > 0.9:
+                self.warnings.append(
+                    f"strategy_allocation.crypto_ratio が高すぎます: {crypto_ratio:.0%}（推奨: 80%以下）"
+                )
+
+        # trend_ratio検証
+        trend_ratio = alloc.get('trend_ratio')
+        if trend_ratio is not None:
+            if not (0.0 <= trend_ratio <= 1.0):
+                self.errors.append(
+                    f"strategy_allocation.trend_ratio は0.0-1.0の範囲で設定してください: {trend_ratio}"
+                )
+
+        # cointegration_ratio検証
+        coint_ratio = alloc.get('cointegration_ratio')
+        if coint_ratio is not None:
+            if not (0.0 <= coint_ratio <= 1.0):
+                self.errors.append(
+                    f"strategy_allocation.cointegration_ratio は0.0-1.0の範囲で設定してください: {coint_ratio}"
+                )
+
+        # 戦略比率の合計チェック
+        if trend_ratio is not None and coint_ratio is not None:
+            total_strategy = trend_ratio + coint_ratio
+            if total_strategy > 1.0:
+                self.warnings.append(
+                    f"strategy_allocation の trend_ratio + cointegration_ratio が1.0を超えています: "
+                    f"{trend_ratio} + {coint_ratio} = {total_strategy:.2f}"
+                )
+            elif total_strategy < 0.5:
+                self.warnings.append(
+                    f"strategy_allocation の戦略配分が低すぎます: "
+                    f"trend={trend_ratio:.0%} + coint={coint_ratio:.0%} = {total_strategy:.0%}"
+                )
 
     def print_validation_result(self, is_valid: bool, errors: List[str], warnings: List[str]):
         """
