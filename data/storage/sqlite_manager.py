@@ -29,6 +29,9 @@ class SQLiteManager:
         self.trades_db = self.db_dir / "trades.db"
         self.ml_models_db = self.db_dir / "ml_models.db"
 
+        # HIGH-8: 接続キャッシュ（接続プーリング）
+        self._connection_cache = {}
+
         # 初期化
         self._initialize_databases()
 
@@ -37,11 +40,13 @@ class SQLiteManager:
         self._init_price_db()
         self._init_trades_db()
         self._init_ml_models_db()
+        # HIGH-6: 既存DBに外部キー制約を追加（マイグレーション）
+        self._migrate_add_foreign_keys()
         logger.info("データベース初期化完了")
 
     def _connect_with_wal(self, db_path: str):
         """
-        WALモードでデータベースに接続
+        WALモードでデータベースに接続（HIGH-8: 接続キャッシュ使用）
 
         Args:
             db_path: データベースファイルパス
@@ -49,17 +54,34 @@ class SQLiteManager:
         Returns:
             WALモード有効化されたsqlite3.Connection
         """
-        conn = sqlite3.connect(db_path)
+        # HIGH-8: キャッシュから接続を取得（なければ新規作成）
+        db_key = str(db_path)
+
+        if db_key in self._connection_cache:
+            conn = self._connection_cache[db_key]
+            try:
+                # 接続が有効か確認
+                conn.execute("SELECT 1")
+                return conn
+            except sqlite3.Error:
+                # 無効な接続は削除して再作成
+                del self._connection_cache[db_key]
+
+        # 新しい接続を作成してキャッシュに保存
+        conn = sqlite3.connect(db_path, check_same_thread=False)  # マルチスレッド対応
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
+        # HIGH-6: 外部キー制約を有効化（孤立レコード防止）
+        conn.execute("PRAGMA foreign_keys=ON")
+
+        self._connection_cache[db_key] = conn
+        logger.debug(f"新規接続をキャッシュ: {Path(db_path).name}")
+
         return conn
 
     def _init_price_db(self):
         """価格データベースの初期化"""
-        conn = sqlite3.connect(self.price_db)
-        # WALモード有効化（クラッシュ時の安全性向上）
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")  # WALと組み合わせて性能向上
+        conn = self._connect_with_wal(self.price_db)  # WALと組み合わせて性能向上
         cursor = conn.cursor()
 
         # OHLCVテーブル
@@ -115,7 +137,7 @@ class SQLiteManager:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_indicators_symbol_time ON technical_indicators(symbol, timeframe, timestamp)")
 
         conn.commit()
-        conn.close()
+        # HIGH-8: 接続はキャッシュされるためclose不要
         logger.info(f"価格データベース初期化: {self.price_db}")
 
         # データベースファイルの権限を制限（オーナーのみ読み書き）
@@ -126,10 +148,7 @@ class SQLiteManager:
 
     def _init_trades_db(self):
         """取引データベースの初期化"""
-        conn = sqlite3.connect(self.trades_db)
-        # WALモード有効化（クラッシュ時の安全性向上）
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        conn = self._connect_with_wal(self.trades_db)
         cursor = conn.cursor()
 
         # 取引履歴テーブル
@@ -149,7 +168,8 @@ class SQLiteManager:
             position_id TEXT,
             profit_loss REAL,
             notes TEXT,
-            created_at INTEGER DEFAULT (strftime('%s', 'now'))
+            created_at INTEGER DEFAULT (strftime('%s', 'now')),
+            FOREIGN KEY (position_id) REFERENCES positions(position_id) ON DELETE SET NULL
         )
         """)
 
@@ -231,7 +251,7 @@ class SQLiteManager:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_pair_positions_status ON pair_positions(status)")
 
         conn.commit()
-        conn.close()
+        # HIGH-8: 接続はキャッシュされるためclose不要
         logger.info(f"取引データベース初期化: {self.trades_db}")
 
         # データベースファイルの権限を制限（オーナーのみ読み書き）
@@ -242,10 +262,7 @@ class SQLiteManager:
 
     def _init_ml_models_db(self):
         """MLモデルデータベースの初期化"""
-        conn = sqlite3.connect(self.ml_models_db)
-        # WALモード有効化（クラッシュ時の安全性向上）
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        conn = self._connect_with_wal(self.ml_models_db)
         cursor = conn.cursor()
 
         # モデルメタデータテーブル
@@ -307,7 +324,7 @@ class SQLiteManager:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_performance_model ON performance(model_id)")
 
         conn.commit()
-        conn.close()
+        # HIGH-8: 接続はキャッシュされるためclose不要
         logger.info(f"MLモデルデータベース初期化: {self.ml_models_db}")
 
         # データベースファイルの権限を制限（オーナーのみ読み書き）
@@ -315,6 +332,99 @@ class SQLiteManager:
             os.chmod(self.ml_models_db, 0o600)
         except (OSError, FileNotFoundError):
             pass  # Windows環境では無視
+
+    def _migrate_add_foreign_keys(self):
+        """
+        HIGH-6: 既存のtradesテーブルに外部キー制約を追加するマイグレーション
+
+        SQLiteは既存テーブルへのFK追加不可のため、テーブル再作成が必要
+        """
+        conn = self._connect_with_wal(self.trades_db)
+        cursor = conn.cursor()
+
+        try:
+            # tradesテーブルのスキーマを確認
+            cursor.execute("PRAGMA table_info(trades)")
+            columns = cursor.fetchall()
+
+            if not columns:
+                # テーブルが存在しない場合はスキップ（新規作成時）
+                # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
+                return
+
+            # 外部キー制約があるか確認
+            cursor.execute("PRAGMA foreign_key_list(trades)")
+            fk_list = cursor.fetchall()
+
+            if fk_list:
+                # すでに外部キーがある場合はスキップ
+                logger.debug("tradesテーブルはすでに外部キー制約を持っています")
+                # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
+                return
+
+            logger.info("🔧 HIGH-6: tradesテーブルに外部キー制約を追加中...")
+
+            # 1. 一時テーブルにデータをバックアップ
+            cursor.execute("ALTER TABLE trades RENAME TO trades_old")
+
+            # 2. 新しいテーブルを外部キー付きで作成
+            cursor.execute("""
+            CREATE TABLE trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                order_type TEXT NOT NULL,
+                price REAL NOT NULL,
+                amount REAL NOT NULL,
+                cost REAL NOT NULL,
+                fee REAL NOT NULL,
+                fee_currency TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                order_id TEXT,
+                position_id TEXT,
+                profit_loss REAL,
+                notes TEXT,
+                created_at INTEGER DEFAULT (strftime('%s', 'now')),
+                FOREIGN KEY (position_id) REFERENCES positions(position_id) ON DELETE SET NULL
+            )
+            """)
+
+            # 3. データをコピー
+            cursor.execute("""
+            INSERT INTO trades (
+                id, symbol, side, order_type, price, amount, cost, fee, fee_currency,
+                timestamp, order_id, position_id, profit_loss, notes, created_at
+            )
+            SELECT
+                id, symbol, side, order_type, price, amount, cost, fee, fee_currency,
+                timestamp, order_id, position_id, profit_loss, notes, created_at
+            FROM trades_old
+            """)
+
+            # 4. インデックスを再作成
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_time ON trades(symbol, timestamp)")
+
+            # 5. 古いテーブルを削除
+            cursor.execute("DROP TABLE trades_old")
+
+            conn.commit()
+            logger.info("✅ HIGH-6: 外部キー制約の追加完了")
+
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"外部キー制約の追加に失敗: {e}")
+            # ロールバックでtrades_oldが残っている場合は元に戻す
+            try:
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='trades_old'")
+                if cursor.fetchone():
+                    cursor.execute("DROP TABLE IF EXISTS trades")
+                    cursor.execute("ALTER TABLE trades_old RENAME TO trades")
+                    conn.commit()
+                    logger.info("テーブルを元に戻しました")
+            except Exception as rollback_error:
+                logger.error(f"ロールバック失敗: {rollback_error}")
+        finally:
+            # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
 
     # ========== データ挿入メソッド ==========
 
@@ -327,7 +437,7 @@ class SQLiteManager:
             symbol: 通貨ペア
             timeframe: 時間足
         """
-        conn = sqlite3.connect(self.price_db)
+        conn = self._connect_with_wal(self.price_db)
 
         # データ準備
         data = data.copy()
@@ -352,7 +462,7 @@ class SQLiteManager:
             logger.error(f"OHLCV挿入エラー: {e}")
             conn.rollback()
         finally:
-            conn.close()
+            # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
 
     def insert_trade(self, trade_data: Dict[str, Any]) -> int:
         """
@@ -364,7 +474,7 @@ class SQLiteManager:
         Returns:
             挿入されたレコードID
         """
-        conn = sqlite3.connect(self.trades_db)
+        conn = self._connect_with_wal(self.trades_db)
         try:
             cursor = conn.cursor()
 
@@ -399,7 +509,7 @@ class SQLiteManager:
             logger.error(f"取引挿入失敗: {e}")
             raise
         finally:
-            conn.close()
+            # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
 
     def create_position(self, position_data: Dict[str, Any]) -> str:
         """
@@ -411,7 +521,7 @@ class SQLiteManager:
         Returns:
             ポジションID
         """
-        conn = sqlite3.connect(self.trades_db)
+        conn = self._connect_with_wal(self.trades_db)
         try:
             cursor = conn.cursor()
 
@@ -437,7 +547,7 @@ class SQLiteManager:
             logger.info(f"ポジション作成: {position_data['position_id']}")
             return position_data['position_id']
         finally:
-            conn.close()
+            # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
 
     def update_position(self, position_id: str, updates: Dict[str, Any]):
         """
@@ -447,7 +557,7 @@ class SQLiteManager:
             position_id: ポジションID
             updates: 更新データ
         """
-        conn = sqlite3.connect(self.trades_db)
+        conn = self._connect_with_wal(self.trades_db)
         try:
             cursor = conn.cursor()
 
@@ -478,7 +588,7 @@ class SQLiteManager:
 
             logger.debug(f"ポジション更新: {position_id}")
         finally:
-            conn.close()
+            # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
 
     # ========== ペアポジション操作メソッド ==========
 
@@ -492,7 +602,7 @@ class SQLiteManager:
         Returns:
             ペアID
         """
-        conn = sqlite3.connect(self.trades_db)
+        conn = self._connect_with_wal(self.trades_db)
         try:
             cursor = conn.cursor()
 
@@ -524,7 +634,7 @@ class SQLiteManager:
             logger.info(f"ペアポジション作成: {position_data['pair_id']}")
             return position_data['pair_id']
         finally:
-            conn.close()
+            # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
 
     def update_pair_position(self, pair_id: str, updates: Dict[str, Any]):
         """
@@ -534,7 +644,7 @@ class SQLiteManager:
             pair_id: ペアID
             updates: 更新データ
         """
-        conn = sqlite3.connect(self.trades_db)
+        conn = self._connect_with_wal(self.trades_db)
         try:
             cursor = conn.cursor()
 
@@ -562,7 +672,7 @@ class SQLiteManager:
 
             logger.debug(f"ペアポジション更新: {pair_id}")
         finally:
-            conn.close()
+            # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
 
     def close_pair_position(self, pair_id: str, exit_data: Dict[str, Any]):
         """
@@ -590,7 +700,7 @@ class SQLiteManager:
         Returns:
             ペアポジションのリスト
         """
-        conn = sqlite3.connect(self.trades_db)
+        conn = self._connect_with_wal(self.trades_db)
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -599,7 +709,7 @@ class SQLiteManager:
 
         columns = [desc[0] for desc in cursor.description]
         rows = cursor.fetchall()
-        conn.close()
+        # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
 
         return [dict(zip(columns, row)) for row in rows]
 
@@ -613,7 +723,7 @@ class SQLiteManager:
         Returns:
             ペアポジションデータ or None
         """
-        conn = sqlite3.connect(self.trades_db)
+        conn = self._connect_with_wal(self.trades_db)
         cursor = conn.cursor()
 
         cursor.execute("SELECT * FROM pair_positions WHERE pair_id = ?", (pair_id,))
@@ -621,10 +731,10 @@ class SQLiteManager:
 
         if row:
             columns = [desc[0] for desc in cursor.description]
-            conn.close()
+            # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
             return dict(zip(columns, row))
 
-        conn.close()
+        # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
         return None
 
     # ========== データ取得メソッド ==========
@@ -646,7 +756,7 @@ class SQLiteManager:
         Returns:
             OHLCVデータフレーム
         """
-        conn = sqlite3.connect(self.price_db)
+        conn = self._connect_with_wal(self.price_db)
 
         query = "SELECT * FROM ohlcv WHERE symbol = ? AND timeframe = ?"
         params = [symbol, timeframe]
@@ -666,7 +776,7 @@ class SQLiteManager:
             params.append(limit)
 
         df = pd.read_sql_query(query, conn, params=params)
-        conn.close()
+        # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
 
         return df
 
@@ -682,7 +792,7 @@ class SQLiteManager:
         Returns:
             OHLCVデータフレーム
         """
-        conn = sqlite3.connect(self.price_db)
+        conn = self._connect_with_wal(self.price_db)
 
         query = """
         SELECT * FROM ohlcv
@@ -692,7 +802,7 @@ class SQLiteManager:
         """
 
         df = pd.read_sql_query(query, conn, params=[symbol, timeframe, limit])
-        conn.close()
+        # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
 
         # 古い順に並び替え
         df = df.sort_values('timestamp').reset_index(drop=True)
@@ -706,12 +816,12 @@ class SQLiteManager:
         Returns:
             ポジションデータフレーム
         """
-        conn = sqlite3.connect(self.trades_db)
+        conn = self._connect_with_wal(self.trades_db)
 
         query = "SELECT * FROM positions WHERE status = 'open' ORDER BY entry_time DESC"
         df = pd.read_sql_query(query, conn)
 
-        conn.close()
+        # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
         return df
 
     def get_daily_pnl(self, start_date: str, end_date: str) -> pd.DataFrame:
@@ -725,7 +835,7 @@ class SQLiteManager:
         Returns:
             日次損益データフレーム
         """
-        conn = sqlite3.connect(self.trades_db)
+        conn = self._connect_with_wal(self.trades_db)
 
         query = """
         SELECT * FROM daily_pnl
@@ -734,7 +844,7 @@ class SQLiteManager:
         """
 
         df = pd.read_sql_query(query, conn, params=[start_date, end_date])
-        conn.close()
+        # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
 
         return df
 
@@ -743,16 +853,16 @@ class SQLiteManager:
     def vacuum_databases(self):
         """データベースを最適化（VACUUM）"""
         for db_path in [self.price_db, self.trades_db, self.ml_models_db]:
-            conn = sqlite3.connect(db_path)
+            conn = self._connect_with_wal(db_path)
             conn.execute("VACUUM")
-            conn.close()
+            # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
             logger.info(f"VACUUM実行: {db_path.name}")
 
     def checkpoint_wal(self):
         """✨ WALチェックポイント実行（WAL→メインDBへの永続化）"""
         for db_path in [self.price_db, self.trades_db, self.ml_models_db]:
             try:
-                conn = sqlite3.connect(db_path)
+                conn = self._connect_with_wal(db_path)
                 # TRUNCATE: WALファイルを切り詰め（サイズ削減）
                 cursor = conn.cursor()
                 cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -764,9 +874,29 @@ class SQLiteManager:
                                f"(書込={result[1]}, CP={result[2]})")
                 else:
                     logger.warning(f"WALチェックポイント警告: {db_path.name} result={result}")
-                conn.close()
+                # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
             except Exception as e:
                 logger.error(f"WALチェックポイント失敗: {db_path.name} - {e}")
+
+    def close_all_connections(self):
+        """HIGH-8: キャッシュされた全接続をクローズ"""
+        for db_key, conn in list(self._connection_cache.items()):
+            try:
+                conn.commit()  # 未コミットの変更を保存
+                conn.close()
+                logger.debug(f"接続クローズ: {Path(db_key).name}")
+            except Exception as e:
+                logger.error(f"接続クローズ失敗: {Path(db_key).name} - {e}")
+
+        self._connection_cache.clear()
+        logger.info("全データベース接続をクローズしました")
+
+    def __del__(self):
+        """デストラクタ: オブジェクト破棄時に接続をクリーンアップ"""
+        try:
+            self.close_all_connections()
+        except Exception:
+            pass  # デストラクタでは例外を無視
 
     def get_database_sizes(self) -> Dict[str, float]:
         """
@@ -788,6 +918,82 @@ class SQLiteManager:
                 sizes[name] = 0.0
 
         return sizes
+
+    def backup_databases(self, backup_dir: str = "database/backups", keep_last: int = 10) -> Dict[str, str]:
+        """
+        MEDIUM-4: 全データベースをバックアップ
+
+        Args:
+            backup_dir: バックアップ保存先ディレクトリ
+            keep_last: 保持する最新バックアップ数（古いものは自動削除）
+
+        Returns:
+            バックアップファイルパスの辞書 {db_name: backup_path}
+        """
+        import shutil
+        from datetime import datetime
+
+        backup_path = Path(backup_dir)
+        backup_path.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_files = {}
+
+        for name, db_path in [
+            ('price_data', self.price_db),
+            ('trades', self.trades_db),
+            ('ml_models', self.ml_models_db)
+        ]:
+            if not db_path.exists():
+                logger.warning(f"DBファイルが存在しません: {db_path}")
+                continue
+
+            try:
+                # バックアップファイル名: dbname_YYYYMMDD_HHMMSS.db
+                backup_file = backup_path / f"{name}_{timestamp}.db"
+
+                # SQLiteの安全なバックアップ（VACUUM INTO使用）
+                conn = self._connect_with_wal(db_path)
+                conn.execute(f"VACUUM INTO '{backup_file}'")
+                # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
+
+                backup_files[name] = str(backup_file)
+                logger.info(f"バックアップ作成: {backup_file.name} ({backup_file.stat().st_size / 1024 / 1024:.2f} MB)")
+
+            except Exception as e:
+                logger.error(f"バックアップ失敗: {name} - {e}")
+
+        # 古いバックアップを削除（最新N個を保持）
+        if keep_last > 0:
+            self._cleanup_old_backups(backup_path, keep_last)
+
+        logger.info(f"データベースバックアップ完了: {len(backup_files)}個のDBを保存")
+        return backup_files
+
+    def _cleanup_old_backups(self, backup_dir: Path, keep_last: int):
+        """
+        古いバックアップファイルを削除
+
+        Args:
+            backup_dir: バックアップディレクトリ
+            keep_last: 保持する最新ファイル数
+        """
+        # データベースごとに古いバックアップを削除
+        for db_name in ['price_data', 'trades', 'ml_models']:
+            # パターンに一致するファイルを取得
+            backup_files = sorted(
+                backup_dir.glob(f"{db_name}_*.db"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True  # 新しい順
+            )
+
+            # 古いファイルを削除
+            for old_file in backup_files[keep_last:]:
+                try:
+                    old_file.unlink()
+                    logger.debug(f"古いバックアップ削除: {old_file.name}")
+                except Exception as e:
+                    logger.error(f"バックアップ削除失敗: {old_file.name} - {e}")
 
     def close_all(self):
         """全接続をクローズ（実際にはSQLiteは自動管理）"""

@@ -57,6 +57,59 @@ class OrderExecutor:
 
         logger.info(f"注文実行モジュール初期化（テストモード: {test_mode}）")
 
+    # ========== MEDIUM-3: 価格・コスト丸め処理 ==========
+
+    @staticmethod
+    def round_price(price: float, symbol: str = "BTC/JPY") -> float:
+        """
+        価格を適切な精度に丸める
+
+        Args:
+            price: 価格
+            symbol: 取引ペア
+
+        Returns:
+            丸めた価格
+        """
+        # JPY建ては整数に丸める
+        if "/JPY" in symbol:
+            return round(price)
+        # その他は8桁精度
+        return round(price, 8)
+
+    @staticmethod
+    def round_amount(amount: float, symbol: str = "BTC/JPY") -> float:
+        """
+        数量を適切な精度に丸める
+
+        Args:
+            amount: 数量
+            symbol: 取引ペア
+
+        Returns:
+            丸めた数量
+        """
+        # 暗号通貨は8桁精度
+        return round(amount, 8)
+
+    @staticmethod
+    def round_cost(cost: float, quote_currency: str = "JPY") -> float:
+        """
+        コスト（金額）を適切な精度に丸める
+
+        Args:
+            cost: コスト
+            quote_currency: 決済通貨
+
+        Returns:
+            丸めたコスト
+        """
+        # JPYは整数に丸める
+        if quote_currency == "JPY":
+            return round(cost)
+        # その他は8桁精度
+        return round(cost, 8)
+
     # ========== リトライ付きAPI呼び出しヘルパー ==========
 
     @retry_on_network_error(max_retries=4, base_delay=2.0)
@@ -122,7 +175,8 @@ class OrderExecutor:
         if not self.test_mode:
             try:
                 estimated_price = self.get_current_price(symbol)
-                estimated_cost = amount * estimated_price
+                # MEDIUM-3: コストを適切に丸める
+                estimated_cost = self.round_cost(amount * estimated_price, "JPY")
                 max_order_cost = 100_000_000  # 1億円
                 if estimated_cost > max_order_cost:
                     logger.error(f"注文金額超過: {symbol} 推定¥{estimated_cost:,.0f} > 上限¥{max_order_cost:,.0f}")
@@ -135,11 +189,12 @@ class OrderExecutor:
                         balance = self.get_balance('JPY')
                         available_jpy = balance.get('free', 0)
                         commission_rate = 0.0015
-                        required_capital = estimated_cost * (1 + commission_rate)
+                        # MEDIUM-3: 必要資本を丸める
+                        required_capital = self.round_cost(estimated_cost * (1 + commission_rate), "JPY")
 
                         # ✨ 3%バッファを追加（価格変動・手数料誤差・並行処理を考慮）
                         buffer_rate = 0.03  # 3%バッファ（HIGH-5: 並行負荷下でも安全）
-                        required_capital_with_buffer = required_capital * (1 + buffer_rate)
+                        required_capital_with_buffer = self.round_cost(required_capital * (1 + buffer_rate), "JPY")
 
                         if required_capital_with_buffer > available_jpy:
                             logger.error(f"残高不足: 必要¥{required_capital:,.0f} (+バッファ¥{required_capital*buffer_rate:,.0f}) > 利用可能¥{available_jpy:,.0f}")
@@ -346,8 +401,8 @@ class OrderExecutor:
         # 正しい計算: quantity * price * (1 + commission) <= capital
         quantity = trade_capital / (current_price * (1 + commission_rate))
 
-        # 精度調整（8桁に丸める）
-        quantity = round(quantity, 8)
+        # MEDIUM-3: 数量を適切な精度に丸める
+        quantity = self.round_amount(quantity, symbol)
 
         logger.info(f"ポジションサイズ計算: {quantity:.6f} {symbol.split('/')[0]} "
                    f"(資金: ¥{available_capital:,.0f}, 価格: ¥{current_price:,.0f})")
@@ -377,10 +432,11 @@ class OrderExecutor:
             'datetime': datetime.now().isoformat(),
             'filled': amount if order_type == 'market' else 0,
             'remaining': 0 if order_type == 'market' else amount,
-            'cost': amount * (price or self.get_current_price(symbol)),
+            # MEDIUM-3: コストと手数料を適切に丸める
+            'cost': self.round_cost(amount * (price or self.get_current_price(symbol)), 'JPY'),
             'fee': {
                 'currency': 'JPY',
-                'cost': amount * (price or self.get_current_price(symbol)) * 0.0015
+                'cost': self.round_cost(amount * (price or self.get_current_price(symbol)) * 0.0015, 'JPY')
             }
         }
 

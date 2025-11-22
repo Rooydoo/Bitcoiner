@@ -386,12 +386,21 @@ class PositionManager:
             }
 
             # トランザクション開始
-            conn = sqlite3.connect(self.db_manager.trades_db)
+            # HIGH-6: 外部キー制約有効化のため、db_manager経由で接続
+            conn = self.db_manager._connect_with_wal(self.db_manager.trades_db)
             try:
                 conn.execute("BEGIN IMMEDIATE")
 
                 # 1. トレード履歴を記録
                 cursor = conn.cursor()
+                # ✨ HIGH-3: 手数料通貨を推定（symbolから判定）
+                # 例: BTC/JPY → JPY、ETH/BTC → BTC
+                if '/' in trade_data['symbol']:
+                    quote_currency = trade_data['symbol'].split('/')[1]
+                    fee_currency = quote_currency
+                else:
+                    fee_currency = 'JPY'  # フォールバック
+
                 cursor.execute("""
                     INSERT INTO trades (
                         position_id, symbol, side, price, amount, cost,
@@ -405,7 +414,7 @@ class PositionManager:
                     trade_data['amount'],
                     trade_data['cost'],
                     trade_data['fee'],
-                    'JPY',  # デフォルト
+                    fee_currency,
                     trade_data['order_type'],
                     trade_data['profit_loss'],
                     trade_data['timestamp']
@@ -426,8 +435,7 @@ class PositionManager:
                 conn.rollback()
                 logger.error(f"  ✗ 部分決済のDB記録失敗: {db_error}")
                 raise
-            finally:
-                conn.close()
+                # HIGH-8: db_managerの接続キャッシュを使用 (conn.close()不要)
 
         # ポジションの数量を更新
         position.quantity = remaining_quantity
@@ -462,13 +470,15 @@ class PositionManager:
         Returns:
             クローズしたPositionインスタンス（存在しない場合はNone）
         """
-        if symbol not in self.open_positions:
-            logger.warning(f"{symbol}のオープンポジションが見つかりません")
-            return None
+        # MEDIUM-1: ポジション辞書の変更を保護
+        with self.position_lock:
+            if symbol not in self.open_positions:
+                logger.warning(f"{symbol}のオープンポジションが見つかりません")
+                return None
 
-        position = self.open_positions.pop(symbol)
-        position.close(exit_price)
-        self.closed_positions.append(position)
+            position = self.open_positions.pop(symbol)
+            position.close(exit_price)
+            self.closed_positions.append(position)
 
         # DBに保存
         if self.db_manager:
@@ -511,7 +521,9 @@ class PositionManager:
         Returns:
             Positionインスタンス（存在しない場合はNone）
         """
-        return self.open_positions.get(symbol)
+        # MEDIUM-1: スレッドセーフなアクセス
+        with self.position_lock:
+            return self.open_positions.get(symbol)
 
     def get_open_position(self, symbol: str) -> Optional[Position]:
         """
@@ -556,23 +568,25 @@ class PositionManager:
         Returns:
             損益情報の辞書
         """
-        unrealized_pnl = 0.0
-        realized_pnl = sum(pos.realized_pnl for pos in self.closed_positions)
+        # MEDIUM-1: ポジション辞書へのアクセスを保護（レースコンディション防止）
+        with self.position_lock:
+            unrealized_pnl = 0.0
+            realized_pnl = sum(pos.realized_pnl for pos in self.closed_positions)
 
-        # 未実現損益
-        for symbol, position in self.open_positions.items():
-            if symbol in current_prices:
-                unrealized_pnl += position.calculate_unrealized_pnl(current_prices[symbol])
+            # 未実現損益
+            for symbol, position in self.open_positions.items():
+                if symbol in current_prices:
+                    unrealized_pnl += position.calculate_unrealized_pnl(current_prices[symbol])
 
-        total_pnl = realized_pnl + unrealized_pnl
+            total_pnl = realized_pnl + unrealized_pnl
 
-        return {
-            'realized_pnl': realized_pnl,
-            'unrealized_pnl': unrealized_pnl,
-            'total_pnl': total_pnl,
-            'open_positions': len(self.open_positions),
-            'closed_positions': len(self.closed_positions)
-        }
+            return {
+                'realized_pnl': realized_pnl,
+                'unrealized_pnl': unrealized_pnl,
+                'total_pnl': total_pnl,
+                'open_positions': len(self.open_positions),
+                'closed_positions': len(self.closed_positions)
+            }
 
     def get_position_summary(self, symbol: str, current_price: float) -> Optional[Dict]:
         """

@@ -189,6 +189,7 @@ class CryptoTrader:
         self.order_lock = threading.Lock()  # 注文実行の排他制御
         self.position_lock = threading.Lock()  # ポジション操作の排他制御
         self.balance_lock = threading.Lock()  # 残高チェックの排他制御
+        self.api_failure_lock = threading.Lock()  # MEDIUM-5: API失敗カウンターの排他制御
         logger.info("  ✓ 並行処理ロック機構を初期化")
 
         logger.info("\n" + "=" * 70)
@@ -785,14 +786,18 @@ class CryptoTrader:
         Args:
             operation: 失敗した操作名
         """
-        self.api_failure_count += 1
-        logger.warning(f"⚠️  API失敗: {operation} ({self.api_failure_count}/{self.api_failure_threshold}回)")
+        # MEDIUM-5: API失敗カウンターをスレッドセーフに更新
+        with self.api_failure_lock:
+            self.api_failure_count += 1
+            current_count = self.api_failure_count
 
-        if self.api_failure_count >= self.api_failure_threshold and not self.safe_mode:
+        logger.warning(f"⚠️  API失敗: {operation} ({current_count}/{self.api_failure_threshold}回)")
+
+        if current_count >= self.api_failure_threshold and not self.safe_mode:
             self.safe_mode = True
             logger.error("=" * 70)
             logger.error("🚨 セーフモード発動: API障害を検出しました")
-            logger.error(f"   連続{self.api_failure_count}回のAPI失敗")
+            logger.error(f"   連続{current_count}回のAPI失敗")
             logger.error("   → 新規ポジションエントリーを停止します")
             logger.error("   → 既存ポジションの決済のみ許可します")
             logger.error("=" * 70)
@@ -802,7 +807,7 @@ class CryptoTrader:
                 try:
                     self.notifier.send_message(
                         "🚨 *セーフモード発動*\n\n"
-                        f"API障害を検出しました（連続{self.api_failure_count}回失敗）\n"
+                        f"API障害を検出しました（連続{current_count}回失敗）\n"
                         "新規エントリーを停止し、既存ポジションの決済のみ許可します。"
                     )
                 except Exception as e:
@@ -810,9 +815,12 @@ class CryptoTrader:
 
     def _handle_api_success(self):
         """API成功時の処理（カウンターリセット）"""
-        if self.api_failure_count > 0:
-            logger.info(f"✓ API復旧: 失敗カウンターをリセット（{self.api_failure_count} → 0）")
-            self.api_failure_count = 0
+        # MEDIUM-5: API失敗カウンターをスレッドセーフにリセット
+        with self.api_failure_lock:
+            if self.api_failure_count > 0:
+                old_count = self.api_failure_count
+                self.api_failure_count = 0
+                logger.info(f"✓ API復旧: 失敗カウンターをリセット（{old_count} → 0）")
 
         if self.safe_mode:
             self.safe_mode = False
@@ -1513,6 +1521,10 @@ class CryptoTrader:
                                         f'未ヘッジポジション: {position.symbol1} {position.size1:.6f}\n'
                                         f'**手動で取引所を確認し、即座にポジションをクローズしてください**'
                                     )
+
+                                    # HIGH-4: セーフモード移行（新規エントリー停止）
+                                    self.safe_mode = True
+                                    logger.critical("🚨 セーフモード移行: ロールバック失敗のため新規エントリーを停止")
                             except Exception as rollback_error:
                                 logger.error(f"      ✗✗✗ ロールバック処理エラー: {rollback_error}")
 
@@ -1525,6 +1537,10 @@ class CryptoTrader:
                                     f'エラー: {rollback_error}\n'
                                     f'**手動で取引所を確認し、即座にポジションをクローズしてください**'
                                 )
+
+                                # HIGH-4: セーフモード移行（新規エントリー停止）
+                                self.safe_mode = True
+                                logger.critical("🚨 セーフモード移行: ロールバック処理エラーのため新規エントリーを停止")
 
                     # 注文結果に応じてステータスを更新
                     if orders_success:
@@ -1660,6 +1676,10 @@ class CryptoTrader:
                                 f'{position.symbol2} はまだオープン中\n'
                                 f'**手動で取引所を確認し、ヘッジ状態を復元してください**'
                             )
+
+                            # HIGH-4: セーフモード移行（新規エントリー停止）
+                            self.safe_mode = True
+                            logger.critical("🚨 セーフモード移行: ロールバック失敗のため新規エントリーを停止")
                     except Exception as rollback_error:
                         logger.error(f"      ✗✗✗ ロールバック処理エラー: {rollback_error}")
 
@@ -1673,6 +1693,10 @@ class CryptoTrader:
                             f'エラー: {rollback_error}\n'
                             f'**手動で取引所を確認し、ヘッジ状態を復元してください**'
                         )
+
+                        # HIGH-4: セーフモード移行（新規エントリー停止）
+                        self.safe_mode = True
+                        logger.critical("🚨 セーフモード移行: ロールバック処理エラーのため新規エントリーを停止")
 
             # 両方の決済注文が成功した場合のみ処理を続行
             if not orders_success:
