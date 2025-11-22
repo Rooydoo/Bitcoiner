@@ -172,7 +172,7 @@ class PositionManager:
                 'side': side,
                 'entry_price': entry_price,
                 'entry_amount': quantity,
-                'entry_time': position.entry_time.isoformat(),
+                'entry_time': int(position.entry_time.timestamp()),  # Unix timestamp
                 'status': 'open'
             }
             self.db_manager.create_position(position_data)
@@ -222,7 +222,7 @@ class PositionManager:
                 'side': side,
                 'entry_price': entry_price,
                 'entry_amount': quantity,
-                'entry_time': position.entry_time.isoformat(),
+                'entry_time': int(position.entry_time.timestamp()),  # Unix timestamp
                 'status': 'pending_execution'
             }
             self.db_manager.create_position(position_data)
@@ -373,8 +373,8 @@ class PositionManager:
                 'cost': exit_price * partial_quantity,
                 'fee': entry_fee + exit_fee,  # 総手数料
                 'order_type': 'market',
-                'pnl': partial_pnl_after_fees,  # 手数料控除後
-                'timestamp': datetime.now().isoformat()
+                'profit_loss': partial_pnl_after_fees,  # フィールド名修正（pnl → profit_loss）
+                'timestamp': int(datetime.now().timestamp())  # Unix timestamp
             }
             self.db_manager.insert_trade(trade_data)
 
@@ -431,7 +431,7 @@ class PositionManager:
             updates = {
                 'exit_price': exit_price,
                 'exit_amount': position.quantity,
-                'exit_time': position.exit_time.isoformat(),
+                'exit_time': int(position.exit_time.timestamp()),  # Unix timestamp
                 'status': 'closed'
             }
             self.db_manager.update_position(position.position_id, updates)
@@ -449,8 +449,8 @@ class PositionManager:
                 'cost': exit_price * position.quantity,
                 'fee': entry_fee + exit_fee,  # 総手数料（エントリー+決済）
                 'order_type': 'market',
-                'pnl': position.realized_pnl,  # 既に手数料控除済み
-                'timestamp': datetime.now().isoformat()
+                'profit_loss': position.realized_pnl,  # フィールド名修正（pnl → profit_loss）
+                'timestamp': int(datetime.now().timestamp())  # Unix timestamp
             }
             self.db_manager.insert_trade(trade_data)
 

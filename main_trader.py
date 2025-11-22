@@ -147,6 +147,9 @@ class CryptoTrader:
         # DBからオープン中のペアポジションを復元
         self._restore_pair_positions()
 
+        # DBからオープン中の通常ポジションを復元
+        self._restore_regular_positions()
+
         # 戦略配分設定
         self.strategy_allocation = self.config.get('strategy_allocation', {
             'crypto_ratio': 0.5,
@@ -251,6 +254,76 @@ class CryptoTrader:
 
         except Exception as e:
             logger.error(f"ペアポジション復元エラー: {e}")
+
+    def _restore_regular_positions(self):
+        """DBからオープン中の通常ポジションを復元"""
+        try:
+            df = self.db_manager.get_open_positions()
+
+            if df.empty:
+                logger.info("  復元する通常ポジションはありません")
+                return
+
+            # pending_execution状態のポジションを古い順にチェック
+            from datetime import datetime, timedelta
+            now_timestamp = int(datetime.now().timestamp())
+            five_minutes_ago = now_timestamp - 300  # 5分前
+
+            restored_count = 0
+            for _, row in df.iterrows():
+                try:
+                    # 5分以上前のpending_executionは失敗とみなす
+                    if row['status'] == 'pending_execution':
+                        if row['entry_time'] < five_minutes_ago:
+                            logger.warning(f"  ⚠ 古い保留ポジションを失敗扱いに: {row['position_id']}")
+                            self.db_manager.update_position(
+                                row['position_id'],
+                                {'status': 'execution_failed'}
+                            )
+                            continue
+                        else:
+                            # 最近のpending_executionはスキップ（まだ処理中の可能性）
+                            logger.info(f"  → 保留中ポジションをスキップ: {row['position_id']}")
+                            continue
+
+                    # execution_failed状態もスキップ
+                    if row['status'] == 'execution_failed':
+                        continue
+
+                    # openステータスのポジションのみ復元
+                    if row['status'] == 'open':
+                        from trading.position_manager import Position
+
+                        position = Position(
+                            symbol=row['symbol'],
+                            side=row['side'],
+                            entry_price=row['entry_price'],
+                            quantity=row['entry_amount'],
+                            entry_time=datetime.fromtimestamp(row['entry_time']),
+                            position_id=row['position_id']
+                        )
+
+                        # ストップロス・利確レベルを復元
+                        if pd.notna(row.get('stop_loss')):
+                            position.stop_loss = row['stop_loss']
+                        if pd.notna(row.get('take_profit')):
+                            position.take_profit = row['take_profit']
+
+                        # メモリに追加
+                        self.position_manager.open_positions[row['symbol']] = position
+                        restored_count += 1
+
+                        logger.info(f"  ✓ ポジション復元: {row['symbol']} {row['side']} "
+                                   f"{row['entry_amount']:.6f} @ ¥{row['entry_price']:,.0f}")
+
+                except Exception as e:
+                    logger.error(f"  ✗ ポジション復元エラー: {row.get('position_id', 'unknown')} - {e}")
+
+            if restored_count > 0:
+                logger.info(f"  ✓ {restored_count}件の通常ポジションを復元しました")
+
+        except Exception as e:
+            logger.error(f"通常ポジション復元エラー: {e}")
 
     def _train_initial_models(self):
         """初回起動時のモデル学習"""

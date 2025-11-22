@@ -425,7 +425,7 @@ class SQLiteManager:
                 position_data['entry_time'],
                 position_data.get('stop_loss'),
                 position_data.get('take_profit'),
-                'open'
+                position_data.get('status', 'open')  # 渡されたstatusを使用（デフォルトは'open'）
             ))
 
             conn.commit()
@@ -449,6 +449,7 @@ class SQLiteManager:
 
             # 許可されたカラム名のホワイトリスト
             ALLOWED_POSITION_COLUMNS = {
+                'entry_price', 'entry_amount',  # 二段階コミット確定時に必要
                 'exit_price', 'exit_amount', 'exit_time', 'status',
                 'profit_loss', 'profit_loss_pct', 'stop_loss', 'take_profit'
             }
