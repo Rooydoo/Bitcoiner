@@ -48,7 +48,11 @@ from utils.performance_tracker import PerformanceTracker
 from utils.constants import (
     PRICE_SLIP_WARNING_THRESHOLD,
     PRICE_SLIP_ERROR_THRESHOLD,
-    PARTIAL_FILL_THRESHOLD
+    PARTIAL_FILL_THRESHOLD,
+    API_FAILURE_THRESHOLD,
+    POSITION_RECONCILE_CYCLES,
+    WAL_CHECKPOINT_CYCLES,
+    DB_CONNECTION_REFRESH_CYCLES
 )
 
 # ロガー設定
@@ -71,7 +75,7 @@ class CryptoTrader:
         self.test_mode = test_mode
         self.safe_mode = False  # API障害時の安全モード
         self.api_failure_count = 0  # API失敗回数カウンター
-        self.api_failure_threshold = 5  # 5回連続失敗でセーフモード
+        self.api_failure_threshold = API_FAILURE_THRESHOLD  # 定数から読み込み
         logger.info("=" * 70)
         logger.info("CryptoTrader 起動中...")
         logger.info(f"モード: {'テスト' if test_mode else '本番'}")
@@ -2138,17 +2142,17 @@ class CryptoTrader:
                         logger.info(f"サイクル成功 - APIエラーカウントリセット（前回: {consecutive_api_errors}回）")
                         consecutive_api_errors = 0
 
-                    # ✨ 10サイクルごとにunknown状態のポジションを調整
-                    if cycle_count % 10 == 0:
+                    # ✨ 定期的にunknown状態のポジションを調整
+                    if cycle_count % POSITION_RECONCILE_CYCLES == 0:
                         self.reconcile_unknown_positions()
 
-                    # ✨ 60サイクルごと(約1時間)にWALチェックポイント
-                    if cycle_count % 60 == 0:
+                    # ✨ 定期的にWALチェックポイント
+                    if cycle_count % WAL_CHECKPOINT_CYCLES == 0:
                         logger.info("[メンテナンス] WALチェックポイント実行")
                         self.db_manager.checkpoint_wal()
 
-                    # CRITICAL-1: 180サイクルごと(約3時間)にDB接続をクリーンアップ
-                    if cycle_count % 180 == 0:
+                    # CRITICAL-1: 定期的にDB接続をクリーンアップ
+                    if cycle_count % DB_CONNECTION_REFRESH_CYCLES == 0:
                         logger.info("[メンテナンス] データベース接続をリフレッシュ")
                         self.db_manager.close_all_connections()
                         logger.debug("  ✓ 古い接続をクローズし、次回アクセス時に新規接続を作成します")

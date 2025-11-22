@@ -8,6 +8,7 @@ import threading
 from typing import Dict, Optional, List
 from datetime import datetime
 from data.storage.sqlite_manager import SQLiteManager
+from utils.constants import BITFLYER_COMMISSION_RATE
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ class Position:
         self.realized_pnl = 0.0
         self.status = 'open'  # 'open', 'closed'
 
-    def calculate_unrealized_pnl(self, current_price: float, commission_rate: float = 0.0015) -> float:
+    def calculate_unrealized_pnl(self, current_price: float, commission_rate: float = BITFLYER_COMMISSION_RATE) -> float:
         """
         未実現損益を計算（手数料考慮）
 
@@ -348,7 +349,7 @@ class PositionManager:
         remaining_quantity = position.quantity * (1.0 - close_ratio)
 
         # 部分決済のPNL計算（手数料考慮）
-        commission_rate = 0.0015  # bitFlyer手数料 0.15%
+        commission_rate = BITFLYER_COMMISSION_RATE
 
         if position.side == 'long':
             partial_pnl = (exit_price - position.entry_price) * partial_quantity
@@ -502,7 +503,7 @@ class PositionManager:
 
                     # トレード履歴にも記録
                     from datetime import datetime
-                    commission_rate = 0.0015
+                    commission_rate = BITFLYER_COMMISSION_RATE
                     entry_fee = position.entry_price * position.quantity * commission_rate
                     exit_fee = exit_price * position.quantity * commission_rate
                     trade_data = {
