@@ -190,6 +190,7 @@ class CryptoTrader:
         self.position_lock = threading.Lock()  # ポジション操作の排他制御
         self.balance_lock = threading.Lock()  # 残高チェックの排他制御
         self.api_failure_lock = threading.Lock()  # MEDIUM-5: API失敗カウンターの排他制御
+        self.safe_mode_lock = threading.Lock()  # CRITICAL-4: safe_modeフラグの排他制御
         logger.info("  ✓ 並行処理ロック機構を初期化")
 
         logger.info("\n" + "=" * 70)
@@ -265,7 +266,7 @@ class CryptoTrader:
             # ✨ 復元失敗が1件以上ある場合はセーフモードに移行
             if failed_positions:
                 logger.error(f"  🚨 {len(failed_positions)}件のペアポジション復元に失敗 → セーフモード移行")
-                self.safe_mode = True
+                self._set_safe_mode(True, "ポジション復元失敗")
                 self.notifier.notify_error(
                     '起動時ポジション復元失敗',
                     f'{len(failed_positions)}件のペアポジション復元に失敗しました。\n'
@@ -277,7 +278,7 @@ class CryptoTrader:
         except Exception as e:
             logger.error(f"ペアポジション復元エラー: {e}")
             # 復元プロセス全体が失敗した場合もセーフモード
-            self.safe_mode = True
+            self._set_safe_mode(True, "ポジション復元失敗")
             self.notifier.notify_error(
                 '起動時ポジション復元失敗',
                 f'ペアポジション復元プロセスが失敗しました。\n'
@@ -358,7 +359,7 @@ class CryptoTrader:
             # ✨ 復元失敗が1件以上ある場合はセーフモードに移行
             if failed_positions:
                 logger.error(f"  🚨 {len(failed_positions)}件の通常ポジション復元に失敗 → セーフモード移行")
-                self.safe_mode = True
+                self._set_safe_mode(True, "ポジション復元失敗")
                 self.notifier.notify_error(
                     '起動時ポジション復元失敗',
                     f'{len(failed_positions)}件の通常ポジション復元に失敗しました。\n'
@@ -370,7 +371,7 @@ class CryptoTrader:
         except Exception as e:
             logger.error(f"通常ポジション復元エラー: {e}")
             # 復元プロセス全体が失敗した場合もセーフモード
-            self.safe_mode = True
+            self._set_safe_mode(True, "ポジション復元失敗")
             self.notifier.notify_error(
                 '起動時ポジション復元失敗',
                 f'通常ポジション復元プロセスが失敗しました。\n'
@@ -779,6 +780,24 @@ class CryptoTrader:
             logger.error(f"残高取得エラー: {e}")
             return 0.0
 
+    # ========== CRITICAL-4: safe_modeスレッドセーフアクセス ==========
+
+    def _set_safe_mode(self, value: bool, reason: str = ""):
+        """safe_modeをスレッドセーフに設定"""
+        with self.safe_mode_lock:
+            old_value = self.safe_mode
+            self.safe_mode = value
+            if old_value != value:
+                status = "発動" if value else "解除"
+                logger.info(f"セーフモード{status}: {reason}" if reason else f"セーフモード{status}")
+
+    def _is_safe_mode(self) -> bool:
+        """safe_modeをスレッドセーフに取得"""
+        with self.safe_mode_lock:
+            return self.safe_mode
+
+    # ========== API障害ハンドリング ==========
+
     def _handle_api_failure(self, operation: str = "API操作"):
         """
         API失敗時の処理
@@ -793,8 +812,9 @@ class CryptoTrader:
 
         logger.warning(f"⚠️  API失敗: {operation} ({current_count}/{self.api_failure_threshold}回)")
 
-        if current_count >= self.api_failure_threshold and not self.safe_mode:
-            self.safe_mode = True
+        # CRITICAL-4: スレッドセーフにsafe_modeをチェック・設定
+        if current_count >= self.api_failure_threshold and not self._is_safe_mode():
+            self._set_safe_mode(True, f"API障害検出（連続{current_count}回失敗）")
             logger.error("=" * 70)
             logger.error("🚨 セーフモード発動: API障害を検出しました")
             logger.error(f"   連続{current_count}回のAPI失敗")
@@ -822,8 +842,9 @@ class CryptoTrader:
                 self.api_failure_count = 0
                 logger.info(f"✓ API復旧: 失敗カウンターをリセット（{old_count} → 0）")
 
-        if self.safe_mode:
-            self.safe_mode = False
+        # CRITICAL-4: スレッドセーフにsafe_modeを解除
+        if self._is_safe_mode():
+            self._set_safe_mode(False, "API復旧")
             logger.info("=" * 70)
             logger.info("✅ セーフモード解除: API接続が回復しました")
             logger.info("   → 通常取引を再開します")
@@ -926,7 +947,7 @@ class CryptoTrader:
         """
         try:
             # セーフモードチェック
-            if self.safe_mode:
+            if self._is_safe_mode():
                 logger.warning(f"  🚨 {symbol} エントリー拒否: セーフモード中（新規エントリー停止）")
                 return
 
@@ -1205,7 +1226,8 @@ class CryptoTrader:
                 partial_quantity
             )
 
-            if order and order['status'] in ['closed', 'filled']:
+            # HIGH-4: order status field validation
+            if order and order.get('status') in ['closed', 'filled']:
                 # ポジションマネージャーで部分決済処理
                 partial_info = self.position_manager.partial_close_position(
                     symbol,
@@ -1259,7 +1281,8 @@ class CryptoTrader:
                 position.quantity
             )
 
-            if order and order['status'] in ['closed', 'filled']:
+            # HIGH-4: order status field validation
+            if order and order.get('status') in ['closed', 'filled']:
                 # ポジションクローズ
                 closed_position = self.position_manager.close_position(symbol, exit_price)
 
@@ -1523,7 +1546,7 @@ class CryptoTrader:
                                     )
 
                                     # HIGH-4: セーフモード移行（新規エントリー停止）
-                                    self.safe_mode = True
+                                    self._set_safe_mode(True, "ペア取引ロールバック失敗")
                                     logger.critical("🚨 セーフモード移行: ロールバック失敗のため新規エントリーを停止")
                             except Exception as rollback_error:
                                 logger.error(f"      ✗✗✗ ロールバック処理エラー: {rollback_error}")
@@ -1539,7 +1562,7 @@ class CryptoTrader:
                                 )
 
                                 # HIGH-4: セーフモード移行（新規エントリー停止）
-                                self.safe_mode = True
+                                self._set_safe_mode(True, "ポジション復元失敗")
                                 logger.critical("🚨 セーフモード移行: ロールバック処理エラーのため新規エントリーを停止")
 
                     # 注文結果に応じてステータスを更新
@@ -1678,7 +1701,7 @@ class CryptoTrader:
                             )
 
                             # HIGH-4: セーフモード移行（新規エントリー停止）
-                            self.safe_mode = True
+                            self._set_safe_mode(True, "ポジション復元失敗")
                             logger.critical("🚨 セーフモード移行: ロールバック失敗のため新規エントリーを停止")
                     except Exception as rollback_error:
                         logger.error(f"      ✗✗✗ ロールバック処理エラー: {rollback_error}")
@@ -1695,7 +1718,7 @@ class CryptoTrader:
                         )
 
                         # HIGH-4: セーフモード移行（新規エントリー停止）
-                        self.safe_mode = True
+                        self._set_safe_mode(True, "ポジション復元失敗")
                         logger.critical("🚨 セーフモード移行: ロールバック処理エラーのため新規エントリーを停止")
 
             # 両方の決済注文が成功した場合のみ処理を続行
@@ -2030,6 +2053,12 @@ class CryptoTrader:
                     if cycle_count % 60 == 0:
                         logger.info("[メンテナンス] WALチェックポイント実行")
                         self.db_manager.checkpoint_wal()
+
+                    # CRITICAL-1: 180サイクルごと(約3時間)にDB接続をクリーンアップ
+                    if cycle_count % 180 == 0:
+                        logger.info("[メンテナンス] データベース接続をリフレッシュ")
+                        self.db_manager.close_all_connections()
+                        logger.debug("  ✓ 古い接続をクローズし、次回アクセス時に新規接続を作成します")
 
                     # 定時レポートチェック（1日3回）
                     now = datetime.now()
