@@ -494,6 +494,7 @@ class SQLiteManager:
                 logger.error(f"ロールバック失敗: {rollback_error}")
         finally:
             # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
+            pass
 
     # ========== データ挿入メソッド ==========
 
@@ -532,6 +533,7 @@ class SQLiteManager:
             conn.rollback()
         finally:
             # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
+            pass
 
     def get_connection(self, db_path):
         """
@@ -591,6 +593,7 @@ class SQLiteManager:
             raise
         finally:
             # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
+            pass
 
     def create_position_atomic(self, position_data: Dict[str, Any], order_callback) -> str:
         """
@@ -673,6 +676,7 @@ class SQLiteManager:
             raise
         finally:
             # HIGH-8: 接続キャッシュのためclose不要
+            pass
 
     def create_position(self, position_data: Dict[str, Any]) -> str:
         """
@@ -711,6 +715,7 @@ class SQLiteManager:
             return position_data['position_id']
         finally:
             # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
+            pass
 
     def update_position(self, position_id: str, updates: Dict[str, Any]):
         """
@@ -752,6 +757,7 @@ class SQLiteManager:
             logger.debug(f"ポジション更新: {position_id}")
         finally:
             # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
+            pass
 
     # ========== ペアポジション操作メソッド ==========
 
@@ -798,6 +804,7 @@ class SQLiteManager:
             return position_data['pair_id']
         finally:
             # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
+            pass
 
     def update_pair_position(self, pair_id: str, updates: Dict[str, Any]):
         """
@@ -836,6 +843,7 @@ class SQLiteManager:
             logger.debug(f"ペアポジション更新: {pair_id}")
         finally:
             # HIGH-8: 接続キャッシュのためclose不要 (conn.close())
+            pass
 
     def close_pair_position(self, pair_id: str, exit_data: Dict[str, Any]):
         """
