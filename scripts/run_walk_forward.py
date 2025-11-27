@@ -21,9 +21,9 @@ from ml.backtesting.walk_forward import create_walk_forward_engine
 from ml.models.ensemble_model import EnsembleModel
 from ml.models.hmm_model import MarketRegimeHMM
 from ml.models.lightgbm_model import PriceDirectionLGBM
-from ml.feature_engineering.feature_engineer import FeatureEngineer
-from data.indicators.technical_indicators import TechnicalIndicators
-from data.collector.bitflyer_client import BitFlyerClient
+from ml.training.feature_engineering import FeatureEngineer
+from data.processor.indicators import TechnicalIndicators
+from data.collector.bitflyer_api import BitflyerDataCollector
 from utils.logger import setup_logger
 
 # ロガー設定
@@ -34,13 +34,12 @@ def prepare_data(symbol: str, days: int = 730) -> pd.DataFrame:
     """データ準備"""
     logger.info(f"データ取得中: {symbol} ({days}日分)")
 
-    client = BitFlyerClient()
-    indicators = TechnicalIndicators()
+    collector = BitflyerDataCollector()
     feature_engineer = FeatureEngineer()
 
     # OHLCVデータ取得（1時間足）
     limit = days * 24
-    ohlcv = client.fetch_ohlcv(symbol, '1h', limit)
+    ohlcv = collector.fetch_ohlcv(symbol, '1h', limit)
 
     if ohlcv is None or len(ohlcv) < 100:
         raise ValueError(f"データ取得失敗: {symbol}")
@@ -54,11 +53,11 @@ def prepare_data(symbol: str, days: int = 730) -> pd.DataFrame:
 
     # テクニカル指標計算
     logger.info("テクニカル指標計算中...")
-    df = indicators.calculate_all_indicators(df)
+    df = TechnicalIndicators.calculate_all(df)
 
     # 特徴量エンジニアリング
     logger.info("特徴量エンジニアリング中...")
-    df = feature_engineer.engineer_features(df)
+    df = feature_engineer.create_all_features(df)
 
     # NaN除去
     df = df.dropna()

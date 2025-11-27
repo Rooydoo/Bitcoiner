@@ -1,4 +1,4 @@
-"""ÐÃ¯Æ¹Èû<â¸åüë"""
+# Backtesting module
 
 from ml.backtesting.backtest_engine import BacktestEngine, create_backtest_engine
 from ml.backtesting.walk_forward import WalkForwardEngine, WalkForwardConfig, create_walk_forward_engine
