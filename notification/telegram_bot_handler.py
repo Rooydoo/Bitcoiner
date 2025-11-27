@@ -718,6 +718,190 @@ class TelegramBotHandler:
             logger.error(f"set_allocationコマンドエラー: {e}")
             await self._send_reply(update, f"⚠️ エラー: {str(e)}")
 
+    async def cmd_leverage(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """レバレッジ設定確認コマンド"""
+        if not self._check_authorization(update):
+            await self._send_reply(update, "⛔ 認証エラー：このBotを使用する権限がありません")
+            return
+
+        try:
+            config_path = Path("config/config.yaml")
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+
+            leverage = config.get('leverage', {})
+            enabled = leverage.get('enabled', False)
+            max_leverage = leverage.get('max_leverage', 2.0)
+            fx_symbol = leverage.get('fx_symbol', 'FX_BTC_JPY')
+            margin_call = leverage.get('margin_call_threshold', 0.8)
+            liquidation = leverage.get('liquidation_threshold', 0.5)
+            allow_short = leverage.get('allow_short', False)
+
+            status_emoji = "🟢" if enabled else "⚪"
+            short_emoji = "✅" if allow_short else "❌"
+
+            message = f"""
+⚡ <b>レバレッジ設定</b>
+━━━━━━━━━━━━━━━━
+
+{status_emoji} 状態: <b>{'有効（FX取引）' if enabled else '無効（現物取引）'}</b>
+
+<b>設定値</b>
+• 最大レバレッジ: {max_leverage}倍
+• FXシンボル: {fx_symbol}
+• ショート: {short_emoji}
+
+<b>リスク設定</b>
+• マージンコール: {margin_call:.0%}
+• ロスカット: {liquidation:.0%}
+
+<b>変更コマンド</b>
+/set_leverage on - FX取引有効
+/set_leverage off - 現物取引
+/set_leverage 1.5 - レバレッジ倍率
+/set_leverage short on - ショート有効
+
+⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+            await self._send_reply(update, message.strip())
+            logger.info(f"レバレッジ設定確認: Chat ID {update.effective_chat.id}")
+
+        except Exception as e:
+            logger.error(f"leverageコマンドエラー: {e}")
+            await self._send_reply(update, f"⚠️ エラー: {str(e)}")
+
+    async def cmd_set_leverage(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """レバレッジ設定変更コマンド"""
+        if not self._check_authorization(update):
+            await self._send_reply(update, "⛔ 認証エラー：このBotを使用する権限がありません")
+            return
+
+        try:
+            if len(context.args) < 1:
+                await self._send_reply(update, """❌ 使い方: /set_leverage <設定>
+
+<b>設定:</b>
+• on - FX取引（レバレッジ）有効
+• off - 現物取引のみ
+• 1.0～2.0 - レバレッジ倍率
+• short on - ショート許可
+• short off - ショート禁止
+
+例:
+/set_leverage on
+/set_leverage 1.5
+/set_leverage short on""")
+                return
+
+            # 設定ファイル読み込み
+            config_path = Path("config/config.yaml")
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+
+            if 'leverage' not in config:
+                config['leverage'] = {
+                    'enabled': False,
+                    'max_leverage': 2.0,
+                    'fx_symbol': 'FX_BTC_JPY',
+                    'margin_call_threshold': 0.8,
+                    'liquidation_threshold': 0.5,
+                    'allow_short': False
+                }
+
+            arg1 = context.args[0].lower()
+            change_msg = ""
+
+            # ショート設定
+            if arg1 == 'short':
+                if len(context.args) < 2:
+                    await self._send_reply(update, "❌ 使い方: /set_leverage short on/off")
+                    return
+
+                arg2 = context.args[1].lower()
+                if arg2 == 'on':
+                    old_val = config['leverage'].get('allow_short', False)
+                    config['leverage']['allow_short'] = True
+                    change_msg = f"ショート: {'許可' if old_val else '禁止'} → <b>許可</b>"
+                elif arg2 == 'off':
+                    old_val = config['leverage'].get('allow_short', False)
+                    config['leverage']['allow_short'] = False
+                    change_msg = f"ショート: {'許可' if old_val else '禁止'} → <b>禁止</b>"
+                else:
+                    await self._send_reply(update, "❌ on または off を指定してください")
+                    return
+
+            # FX取引有効/無効
+            elif arg1 == 'on':
+                old_val = config['leverage'].get('enabled', False)
+                config['leverage']['enabled'] = True
+                change_msg = f"レバレッジ: {'有効' if old_val else '無効'} → <b>有効（FX取引）</b>"
+
+                # 実行中インスタンスにも反映
+                if self.trader and hasattr(self.trader, 'leverage_config'):
+                    self.trader.leverage_config['enabled'] = True
+                    if hasattr(self.trader, 'order_executor'):
+                        self.trader.order_executor.leverage_enabled = True
+
+            elif arg1 == 'off':
+                old_val = config['leverage'].get('enabled', False)
+                config['leverage']['enabled'] = False
+                change_msg = f"レバレッジ: {'有効' if old_val else '無効'} → <b>無効（現物取引）</b>"
+
+                # 実行中インスタンスにも反映
+                if self.trader and hasattr(self.trader, 'leverage_config'):
+                    self.trader.leverage_config['enabled'] = False
+                    if hasattr(self.trader, 'order_executor'):
+                        self.trader.order_executor.leverage_enabled = False
+
+            # レバレッジ倍率
+            else:
+                try:
+                    new_leverage = float(arg1)
+                    if new_leverage < 1.0 or new_leverage > 2.0:
+                        await self._send_reply(update, "❌ レバレッジは1.0～2.0の範囲で指定してください\n（bitFlyer FXは最大2倍）")
+                        return
+
+                    old_val = config['leverage'].get('max_leverage', 2.0)
+                    config['leverage']['max_leverage'] = new_leverage
+                    change_msg = f"最大レバレッジ: {old_val}倍 → <b>{new_leverage}倍</b>"
+
+                    # 実行中インスタンスにも反映
+                    if self.trader and hasattr(self.trader, 'leverage_config'):
+                        self.trader.leverage_config['max_leverage'] = new_leverage
+                        if hasattr(self.trader, 'order_executor'):
+                            self.trader.order_executor.max_leverage = new_leverage
+
+                except ValueError:
+                    await self._send_reply(update, "❌ 無効な設定です。on/off または数値（1.0～2.0）を指定してください")
+                    return
+
+            # バックアップ作成
+            backup_path = config_path.parent / f"config.yaml.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            with open(backup_path, 'w', encoding='utf-8') as f:
+                yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
+
+            # 保存
+            with open(config_path, 'w', encoding='utf-8') as f:
+                yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
+
+            message = f"""
+✅ <b>レバレッジ設定変更完了</b>
+
+{change_msg}
+
+⚠️ <b>注意</b>
+FX取引はレバレッジにより損失も拡大します。
+ペアトレードは常に1倍（現物相当）で動作します。
+
+/leverage で確認できます
+"""
+            await self._send_reply(update, message.strip())
+            logger.info(f"レバレッジ設定変更: {change_msg} (Chat ID: {update.effective_chat.id})")
+
+        except Exception as e:
+            logger.error(f"set_leverageコマンドエラー: {e}")
+            await self._send_reply(update, f"⚠️ エラー: {str(e)}")
+
     async def cmd_commands(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """コマンド一覧（簡潔版）"""
         if not self._check_authorization(update):
@@ -731,12 +915,14 @@ class TelegramBotHandler:
 /positions - ポジション
 /config - 設定表示
 /allocation - 戦略配分確認
+/leverage - レバレッジ設定
 /pause - 一時停止
 /resume - 再開
 /close_all - 全ポジション売却
 /rebalance - 配分に合わせてリバランス
 /set_stop_loss <値> - 損切変更
 /set_alloc <種類> <値> - 配分変更
+/set_leverage <設定> - レバレッジ変更
 /commands - この一覧
 /help - 詳細ヘルプ
 
@@ -758,14 +944,24 @@ class TelegramBotHandler:
 /status - システム状態確認
 /positions - 保有ポジション一覧
 /config - 現在の設定表示
+/allocation - 戦略配分確認
+/leverage - レバレッジ設定
 
 ⚙️ <b>制御</b>
 /pause - 取引一時停止
 /resume - 取引再開
+/close_all - 全ポジション売却
+/rebalance - 配分に合わせてリバランス
 
 🔧 <b>設定変更</b>
 /set_stop_loss <値> - 損切ライン変更
-例: /set_stop_loss 8.0
+/set_alloc <種類> <値> - 戦略配分変更
+/set_leverage <設定> - レバレッジ変更
+
+⚡ <b>レバレッジ例</b>
+/set_leverage on - FX取引有効
+/set_leverage off - 現物取引
+/set_leverage 1.5 - 倍率変更
 
 ❓ <b>その他</b>
 /commands - コマンド一覧（簡潔版）
@@ -798,12 +994,14 @@ class TelegramBotHandler:
                     BotCommand("positions", "保有ポジション一覧"),
                     BotCommand("config", "現在の設定表示"),
                     BotCommand("allocation", "戦略配分確認"),
+                    BotCommand("leverage", "レバレッジ設定確認"),
                     BotCommand("pause", "取引一時停止"),
                     BotCommand("resume", "取引再開"),
                     BotCommand("close_all", "全ポジション売却"),
                     BotCommand("rebalance", "配分に合わせてリバランス"),
                     BotCommand("set_stop_loss", "損切ライン変更"),
                     BotCommand("set_alloc", "戦略配分変更"),
+                    BotCommand("set_leverage", "レバレッジ設定変更"),
                     BotCommand("commands", "コマンド一覧"),
                     BotCommand("help", "詳細ヘルプ"),
                 ]
@@ -825,10 +1023,12 @@ class TelegramBotHandler:
                 self.application.add_handler(CommandHandler("positions", self.cmd_positions))
                 self.application.add_handler(CommandHandler("config", self.cmd_config))
                 self.application.add_handler(CommandHandler("allocation", self.cmd_allocation))
+                self.application.add_handler(CommandHandler("leverage", self.cmd_leverage))
                 self.application.add_handler(CommandHandler("close_all", self.cmd_close_all))
                 self.application.add_handler(CommandHandler("rebalance", self.cmd_rebalance))
                 self.application.add_handler(CommandHandler("set_stop_loss", self.cmd_set_stop_loss))
                 self.application.add_handler(CommandHandler("set_alloc", self.cmd_set_allocation))
+                self.application.add_handler(CommandHandler("set_leverage", self.cmd_set_leverage))
                 self.application.add_handler(CommandHandler("commands", self.cmd_commands))
                 self.application.add_handler(CommandHandler("help", self.cmd_help))
                 self.application.add_handler(CommandHandler("start", self.cmd_commands))
