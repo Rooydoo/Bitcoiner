@@ -318,7 +318,7 @@ class OrderExecutor:
         position_ratio: float = 0.95
     ) -> float:
         """
-        ポジションサイズを計算
+        ポジションサイズを計算（エントリー・エグジット両方の手数料を考慮）
 
         Args:
             symbol: 取引ペア
@@ -327,6 +327,11 @@ class OrderExecutor:
 
         Returns:
             購入可能数量
+
+        Note:
+            エントリー時とエグジット時の両方で手数料がかかるため、
+            両方を考慮してポジションサイズを計算する。
+            これにより、決済時に資金不足になることを防ぐ。
         """
         current_price = self.get_current_price(symbol)
 
@@ -338,15 +343,20 @@ class OrderExecutor:
         trade_capital = available_capital * position_ratio
         commission_rate = 0.0015  # bitFlyer手数料
 
-        # 手数料を考慮した購入可能数量
-        # 正しい計算: quantity * price * (1 + commission) <= capital
-        quantity = trade_capital / (current_price * (1 + commission_rate))
+        # エントリー・エグジット両方の手数料を考慮
+        # エントリー時: quantity * price * (1 + commission)
+        # エグジット時: quantity * price * commission（最悪の場合を想定）
+        # 合計: quantity * price * (1 + 2 * commission) <= capital
+        total_commission_factor = 1 + (2 * commission_rate)
+        quantity = trade_capital / (current_price * total_commission_factor)
 
         # 精度調整（8桁に丸める）
         quantity = round(quantity, 8)
 
+        entry_cost = quantity * current_price * (1 + commission_rate)
         logger.info(f"ポジションサイズ計算: {quantity:.6f} {symbol.split('/')[0]} "
-                   f"(資金: ¥{available_capital:,.0f}, 価格: ¥{current_price:,.0f})")
+                   f"(資金: ¥{available_capital:,.0f}, 価格: ¥{current_price:,.0f}, "
+                   f"予想コスト: ¥{entry_cost:,.0f})")
 
         return quantity
 

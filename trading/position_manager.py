@@ -54,19 +54,22 @@ class Position:
 
         Returns:
             未実現損益（手数料控除後）
+
+        Note:
+            エントリー時の手数料は注文執行時にbitFlyerで既に差し引かれているため、
+            ここでは決済時の手数料（見込み）のみを考慮する。
+            エントリー手数料を再度差し引くと二重計算になる。
         """
         if self.side == 'long':
             pnl = (current_price - self.entry_price) * self.quantity
         else:  # short
             pnl = (self.entry_price - current_price) * self.quantity
 
-        # エントリー時手数料（既に支払い済み）
-        entry_fee = self.entry_price * self.quantity * commission_rate
-        # 決済時手数料（未払い、見込み）
+        # 決済時手数料のみ考慮（エントリー時手数料は既に支払い済みのため除外）
         exit_fee = current_price * self.quantity * commission_rate
 
         # 手数料を差し引いた実質PnL
-        pnl_after_fees = pnl - entry_fee - exit_fee
+        pnl_after_fees = pnl - exit_fee
 
         return pnl_after_fees
 
@@ -347,14 +350,11 @@ class PositionManager:
         else:  # short
             partial_pnl = (position.entry_price - exit_price) * partial_quantity
 
-        # 手数料控除
-        # エントリー時手数料（部分比率分）
-        entry_fee = position.entry_price * partial_quantity * commission_rate
-        # 決済時手数料
+        # 決済時手数料のみ考慮（エントリー時手数料は既に支払い済み）
         exit_fee = exit_price * partial_quantity * commission_rate
 
         # 手数料控除後の実質PnL
-        partial_pnl_after_fees = partial_pnl - entry_fee - exit_fee
+        partial_pnl_after_fees = partial_pnl - exit_fee
 
         partial_pnl_pct = (partial_pnl_after_fees / (position.entry_price * partial_quantity)) * 100 if partial_quantity > 0 else 0.0
 
@@ -371,7 +371,7 @@ class PositionManager:
                 'price': exit_price,
                 'amount': partial_quantity,
                 'cost': exit_price * partial_quantity,
-                'fee': entry_fee + exit_fee,  # 総手数料
+                'fee': exit_fee,  # 決済時手数料のみ
                 'order_type': 'market',
                 'pnl': partial_pnl_after_fees,  # 手数料控除後
                 'timestamp': datetime.now().isoformat()
@@ -396,8 +396,7 @@ class PositionManager:
             'partial_pnl': partial_pnl_after_fees,  # 手数料控除後
             'partial_pnl_pct': partial_pnl_pct,
             'exit_price': exit_price,
-            'entry_fee': entry_fee,
-            'exit_fee': exit_fee
+            'exit_fee': exit_fee  # 決済時手数料のみ
         }
 
         return partial_close_info
@@ -439,7 +438,6 @@ class PositionManager:
             # トレード履歴にも記録
             from datetime import datetime
             commission_rate = 0.0015
-            entry_fee = position.entry_price * position.quantity * commission_rate
             exit_fee = exit_price * position.quantity * commission_rate
             trade_data = {
                 'symbol': symbol,
@@ -447,7 +445,7 @@ class PositionManager:
                 'price': exit_price,
                 'amount': position.quantity,
                 'cost': exit_price * position.quantity,
-                'fee': entry_fee + exit_fee,  # 総手数料（エントリー+決済）
+                'fee': exit_fee,  # 決済時手数料のみ（エントリー時は既に支払い済み）
                 'order_type': 'market',
                 'pnl': position.realized_pnl,  # 既に手数料控除済み
                 'timestamp': datetime.now().isoformat()
