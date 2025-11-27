@@ -467,6 +467,11 @@ class OrderExecutor:
         if margin <= 0:
             return {'margin_ratio': 1.0, 'status': 'no_position', 'unrealized_pnl': 0}
 
+        # entry_priceが0または無効な場合のガード
+        if entry_price <= 0:
+            logger.warning("get_margin_status: entry_price が無効です")
+            return {'margin_ratio': 1.0, 'status': 'error', 'unrealized_pnl': 0}
+
         # 未実現損益計算
         if side == 'long':
             unrealized_pnl = (current_price - entry_price) / entry_price

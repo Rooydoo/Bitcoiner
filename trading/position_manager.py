@@ -126,6 +126,10 @@ class Position:
         if not self.is_leveraged or self.margin <= 0:
             return 1.0  # 現物は常に100%
 
+        # entry_priceが無効な場合のガード
+        if self.entry_price <= 0:
+            return 1.0
+
         # 未実現損益（率）
         if self.side == 'long':
             pnl_ratio = (current_price - self.entry_price) / self.entry_price

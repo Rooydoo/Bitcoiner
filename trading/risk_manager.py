@@ -245,8 +245,12 @@ class RiskManager:
             quantity = 0.0
 
         # 最大ポジションサイズで制限
-        max_quantity = (available_capital * self.max_position_size) / current_price
-        quantity = min(quantity, max_quantity)
+        if current_price > 0:
+            max_quantity = (available_capital * self.max_position_size) / current_price
+            quantity = min(quantity, max_quantity)
+        else:
+            logger.warning("calculate_position_size_with_risk: current_price が無効です")
+            quantity = 0.0
 
         logger.info(f"リスクベースポジションサイズ: {quantity:.6f} "
                    f"(リスク額: ¥{risk_amount:,.0f})")
