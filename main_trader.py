@@ -109,7 +109,22 @@ class CryptoTrader:
 
         # Phase 3: 取引エンジン初期化
         logger.info("\n[Phase 3] 取引エンジン初期化")
-        self.order_executor = OrderExecutor(test_mode=test_mode)
+
+        # レバレッジ設定を読み込み（デフォルトは現物取引）
+        leverage_config = self.config.get('leverage', {
+            'enabled': False,
+            'max_leverage': 2.0,
+            'fx_symbol': 'FX_BTC_JPY',
+            'margin_call_threshold': 0.8,
+            'liquidation_threshold': 0.5,
+            'allow_short': False
+        })
+        self.leverage_config = leverage_config
+
+        self.order_executor = OrderExecutor(
+            test_mode=test_mode,
+            leverage_config=leverage_config
+        )
         self.position_manager = PositionManager(self.db_manager)
 
         # 設定値の安全性強制（危険な値を安全な範囲に修正）
@@ -123,7 +138,9 @@ class CryptoTrader:
             consecutive_loss_limit=risk_config.get('consecutive_loss_limit', 5),
             max_daily_loss_pct=risk_config.get('max_daily_loss_pct', 5.0),
             max_weekly_loss_pct=risk_config.get('max_weekly_loss_pct', 10.0),
-            max_monthly_loss_pct=risk_config.get('max_monthly_loss_pct', 15.0)
+            max_monthly_loss_pct=risk_config.get('max_monthly_loss_pct', 15.0),
+            margin_call_threshold=leverage_config.get('margin_call_threshold', 0.8),
+            liquidation_threshold=leverage_config.get('liquidation_threshold', 0.5)
         )
 
         # ペアトレーディング戦略初期化（設定ファイルから読み込み）
