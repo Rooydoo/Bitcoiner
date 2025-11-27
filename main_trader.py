@@ -552,7 +552,7 @@ class CryptoTrader:
         logger.info(f"  {symbol} ポジション保有中: {position.side.upper()}")
         logger.info(f"    未実現損益: ¥{unrealized_pnl:,.0f} ({unrealized_pnl_pct:+.2f}%)")
 
-        # リスク管理チェック
+        # リスク管理チェック（ストップロス、利確など）
         exit_action = self.risk_manager.get_exit_action(position, current_price)
 
         if exit_action:
@@ -562,7 +562,7 @@ class CryptoTrader:
             logger.info(f"  → {action}: {reason}")
 
             # ストップロス or フル決済
-            if action in ['stop_loss', 'full_close']:
+            if action in ['stop_loss', 'full_close', 'liquidation']:
                 self._close_position(symbol, current_price, reason)
 
             # 部分決済
@@ -574,6 +574,36 @@ class CryptoTrader:
 
                 # 部分決済を実行
                 self._partial_close_position(symbol, current_price, close_ratio, level, unrealized_pnl_pct)
+
+            return  # リスク管理アクションを実行したら終了
+
+        # ========== モデルベースのエグジット判定 ==========
+        # ロング保有中にSELL予測（高確信度）→ 決済
+        # ショート保有中にBUY予測（高確信度）→ 決済
+        model_exit_threshold = self.config.get('trading', {}).get('model_exit_threshold', 0.70)
+
+        signal_type = signal.get('signal', 'HOLD')
+        signal_confidence = signal.get('confidence', 0.0)
+
+        should_model_exit = False
+        exit_reason = ''
+
+        if position.side == 'long' and signal_type == 'SELL' and signal_confidence >= model_exit_threshold:
+            should_model_exit = True
+            exit_reason = f'モデル予測反転（SELL {signal_confidence:.1%}）'
+
+        elif position.side == 'short' and signal_type == 'BUY' and signal_confidence >= model_exit_threshold:
+            should_model_exit = True
+            exit_reason = f'モデル予測反転（BUY {signal_confidence:.1%}）'
+
+        if should_model_exit:
+            logger.info(f"  → モデルベース決済: {exit_reason}")
+
+            # 損失が出ている場合は警告
+            if unrealized_pnl_pct < 0:
+                logger.warning(f"    ⚠️  損失決済: {unrealized_pnl_pct:.2f}%（モデル予測に基づく早期撤退）")
+
+            self._close_position(symbol, current_price, exit_reason)
 
     def _get_available_capital(self, strategy_type: str = 'trend') -> float:
         """利用可能資金を取得（戦略配分を考慮）

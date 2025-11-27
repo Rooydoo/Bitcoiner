@@ -376,24 +376,39 @@ class EnsembleModel:
                     confidence = direction_prob
                     entry_type = 'normal'
 
-        # ========== 待機シグナル消化チェック ==========
-        elif symbol in self.pending_signals and is_dip:
-            pending = self.pending_signals[symbol]
-            age_hours = (datetime.now() - pending['timestamp']).total_seconds() / 3600
-
-            # 待機シグナルがあり、押し目になったら買い
-            signal = 'BUY'
-            confidence = pending['probability'] * 1.05
-            entry_type = 'pending_dip_buy'
-            logger.info(f"待機シグナル発動: {symbol} ({dip_reason}) 待機{age_hours:.1f}時間")
-            del self.pending_signals[symbol]
-
-        # ========== 売りシグナル判定 ==========
+        # ========== 売りシグナル判定（優先度高：待機シグナルより先にチェック） ==========
         elif direction == 0 and direction_prob > confidence_threshold:  # Down予測
             if state == 0 or direction_prob > 0.7:
                 signal = 'SELL'
                 confidence = direction_prob
                 entry_type = 'sell_signal'
+
+                # 下降予測が出たら待機シグナルを破棄
+                if symbol in self.pending_signals:
+                    logger.info(f"待機シグナル破棄: {symbol} トレンド反転（Down予測）")
+                    del self.pending_signals[symbol]
+
+        # ========== 待機シグナル消化チェック ==========
+        elif symbol in self.pending_signals and is_dip:
+            pending = self.pending_signals[symbol]
+            age_hours = (datetime.now() - pending['timestamp']).total_seconds() / 3600
+
+            # 現在も上昇方向か確認（トレンド反転していないか）
+            if direction == 2:  # まだUp予測なら買い
+                signal = 'BUY'
+                confidence = pending['probability'] * 1.05
+                entry_type = 'pending_dip_buy'
+                logger.info(f"待機シグナル発動: {symbol} ({dip_reason}) 待機{age_hours:.1f}時間")
+                del self.pending_signals[symbol]
+            elif direction == 1:  # レンジなら様子見（待機シグナル維持）
+                signal = 'HOLD'
+                entry_type = 'pending_wait_range'
+                logger.info(f"待機シグナル保留: {symbol} レンジ相場のため様子見")
+            else:  # Down予測なら待機シグナル破棄
+                logger.info(f"待機シグナル破棄: {symbol} トレンド反転（待機中にDown予測）")
+                del self.pending_signals[symbol]
+                signal = 'HOLD'
+                entry_type = 'pending_cancelled'
 
         # 結果作成
         result = {
