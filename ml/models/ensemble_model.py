@@ -378,15 +378,16 @@ class EnsembleModel:
 
         # ========== 売りシグナル判定（優先度高：待機シグナルより先にチェック） ==========
         elif direction == 0 and direction_prob > confidence_threshold:  # Down予測
+            # Down予測が出たら待機シグナルを破棄（SELLシグナル発動有無に関わらず）
+            if symbol in self.pending_signals:
+                logger.info(f"待機シグナル破棄: {symbol} トレンド反転（Down予測 {direction_prob:.1%}）")
+                del self.pending_signals[symbol]
+
+            # 強いDown予測のみSELLシグナル発動
             if state == 0 or direction_prob > 0.7:
                 signal = 'SELL'
                 confidence = direction_prob
                 entry_type = 'sell_signal'
-
-                # 下降予測が出たら待機シグナルを破棄
-                if symbol in self.pending_signals:
-                    logger.info(f"待機シグナル破棄: {symbol} トレンド反転（Down予測）")
-                    del self.pending_signals[symbol]
 
         # ========== 待機シグナル消化チェック ==========
         elif symbol in self.pending_signals and is_dip:
