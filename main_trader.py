@@ -1302,6 +1302,10 @@ class CryptoTrader:
         if not self.test_mode:
             self._update_capital_periodic()
 
+        # ポジション整合性チェック（手動売却検出）
+        if not self.test_mode:
+            self._reconcile_positions()
+
         # 自動再開チェック（24時間経過で自動的に取引再開）
         if self.risk_manager.check_auto_resume():
             self.notifier.notify_info(
@@ -1609,6 +1613,141 @@ class CryptoTrader:
         if elapsed >= 3600:
             logger.info("\n[定期資産更新] 1時間経過 - 資産を再同期します")
             self._sync_capital_from_api()
+
+    def _reconcile_positions(self):
+        """ポジション状態とAPI残高の整合性をチェック
+
+        システムが保有していると認識しているポジションと、
+        実際のbitFlyer残高を比較し、不整合があれば修正する。
+        （手動売却などを検出）
+        """
+        if self.test_mode:
+            return  # テストモードでは実行しない
+
+        try:
+            logger.info("\n[ポジション整合性チェック] 実残高と照合中...")
+
+            # 現在のオープンポジションを取得
+            open_positions = self.position_manager.get_all_positions()
+
+            if not open_positions:
+                logger.info("  ✓ オープンポジションなし - チェック不要")
+                return
+
+            # API残高を取得
+            balance = self.data_collector.fetch_balance()
+            if balance is None:
+                logger.warning("  ⚠ 残高取得失敗 - チェックスキップ")
+                return
+
+            positions_to_clear = []
+
+            for symbol, position in open_positions.items():
+                # 通貨コードを抽出（BTC/JPY → BTC）
+                base_currency = symbol.split('/')[0]
+
+                # 実際の残高を取得
+                actual_free = balance.get(base_currency, {}).get('free', 0)
+                actual_used = balance.get(base_currency, {}).get('used', 0)
+                actual_total = actual_free + actual_used
+
+                # システム上のポジション数量
+                system_quantity = position.quantity
+
+                # 不整合チェック（10%以上の差異で検出）
+                if actual_total < system_quantity * 0.9:
+                    logger.warning(f"  ⚠ 不整合検出: {symbol}")
+                    logger.warning(f"    システム上: {system_quantity:.6f} {base_currency}")
+                    logger.warning(f"    実残高:     {actual_total:.6f} {base_currency}")
+
+                    if actual_total < system_quantity * 0.1:
+                        # ほぼ全量売却されている場合
+                        logger.warning(f"    → 手動売却と判断 - ポジションをクリアします")
+                        positions_to_clear.append({
+                            'symbol': symbol,
+                            'position': position,
+                            'actual_amount': actual_total,
+                            'reason': '手動売却検出'
+                        })
+                    else:
+                        # 一部売却の場合
+                        logger.warning(f"    → 部分的な手動売却を検出 - 数量を調整します")
+                        # ポジション数量を実残高に合わせて調整
+                        old_quantity = position.quantity
+                        position.quantity = actual_total
+                        logger.info(f"    数量調整: {old_quantity:.6f} → {actual_total:.6f}")
+
+                        # Telegram通知
+                        try:
+                            self.notifier.send_message(
+                                f"⚠ *ポジション調整*\n\n"
+                                f"通貨: {symbol}\n"
+                                f"理由: 手動売却検出（部分）\n"
+                                f"調整: {old_quantity:.6f} → {actual_total:.6f}"
+                            )
+                        except Exception:
+                            pass
+                else:
+                    logger.info(f"  ✓ {symbol}: 整合性OK ({actual_total:.6f} {base_currency})")
+
+            # 不整合ポジションをクリア
+            for item in positions_to_clear:
+                symbol = item['symbol']
+                position = item['position']
+
+                # 現在価格を取得
+                try:
+                    ticker = self.data_collector.fetch_ticker(symbol)
+                    current_price = ticker.get('last', position.entry_price) if ticker else position.entry_price
+                except Exception:
+                    current_price = position.entry_price
+
+                # 損益を推定（売却価格は不明なため、現在価格で推定）
+                estimated_pnl = position.calculate_unrealized_pnl(current_price)
+
+                # ポジションを強制クローズ（メモリとDBから削除）
+                if symbol in self.position_manager.open_positions:
+                    del self.position_manager.open_positions[symbol]
+
+                # DBを更新
+                if self.position_manager.db_manager:
+                    try:
+                        self.position_manager.db_manager.update_position(
+                            position.position_id,
+                            {
+                                'status': 'closed_manual',
+                                'exit_price': current_price,
+                                'exit_time': datetime.now().isoformat()
+                            }
+                        )
+                    except Exception as db_error:
+                        logger.warning(f"  ⚠ DB更新失敗: {db_error}")
+
+                # 利益確定トラッキングをリセット
+                self.risk_manager.reset_profit_tracking(symbol)
+
+                logger.info(f"  ✓ ポジションクリア完了: {symbol}")
+                logger.info(f"    推定損益: ¥{estimated_pnl:,.0f}")
+
+                # Telegram通知
+                try:
+                    self.notifier.send_message(
+                        f"⚠ *手動売却検出*\n\n"
+                        f"通貨: {symbol}\n"
+                        f"数量: {position.quantity:.6f}\n"
+                        f"エントリー価格: ¥{position.entry_price:,.0f}\n"
+                        f"推定損益: ¥{estimated_pnl:,.0f}\n\n"
+                        f"ポジションをクリアしました。"
+                    )
+                except Exception:
+                    pass
+
+            if positions_to_clear:
+                logger.info(f"\n  合計 {len(positions_to_clear)} 件のポジションをクリアしました")
+
+        except Exception as e:
+            logger.error(f"  ✗ ポジション整合性チェックエラー: {e}")
+            logger.error(traceback.format_exc())
 
     def start(self, interval_minutes: int = 5):
         """取引ボット開始
