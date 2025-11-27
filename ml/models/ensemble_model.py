@@ -1,12 +1,14 @@
 """アンサンブルモデル - HMM + LightGBM統合
 
 HMMで市場状態を分類し、LightGBMで価格方向を予測する統合モデル
+押し目買い（下がり待ち）ロジック搭載
 """
 
 import numpy as np
 import pandas as pd
 import logging
 from typing import Dict, Tuple, Optional, List
+from datetime import datetime, timedelta
 import joblib
 from pathlib import Path
 
@@ -23,7 +25,8 @@ class EnsembleModel:
         self,
         hmm_model: Optional[MarketRegimeHMM] = None,
         lgbm_model: Optional[PriceDirectionLGBM] = None,
-        use_state_adjustment: bool = True
+        use_state_adjustment: bool = True,
+        wait_for_dip: bool = True
     ):
         """
         初期化
@@ -32,17 +35,32 @@ class EnsembleModel:
             hmm_model: HMMモデル（Noneの場合は新規作成）
             lgbm_model: LightGBMモデル（Noneの場合は新規作成）
             use_state_adjustment: 市場状態に応じた予測調整を使用するか
+            wait_for_dip: 押し目待ちモードを有効化するか
         """
         self.hmm_model = hmm_model or MarketRegimeHMM(n_states=3)
         self.lgbm_model = lgbm_model or PriceDirectionLGBM(n_classes=3)
         self.use_state_adjustment = use_state_adjustment
+        self.wait_for_dip = wait_for_dip
 
         self.is_fitted = False
+
+        # 押し目待ちモード用の待機シグナル管理
+        self.pending_signals: Dict[str, Dict] = {}
+
+        # 押し目判定パラメータ
+        self.dip_config = {
+            'rsi_threshold': 40,           # RSI < 40 で押し目と判定
+            'sma_distance_threshold': 0,   # 20日MAを下回ったら押し目
+            'return_5d_threshold': -0.03,  # 5日で3%以上下落
+            'signal_expiry_hours': 48,     # 待機シグナルの有効期限（時間）
+            'strong_signal_threshold': 0.75  # 強シグナル閾値（即買い）
+        }
 
         logger.info("アンサンブルモデル初期化")
         logger.info(f"  - HMM状態数: {self.hmm_model.n_states}")
         logger.info(f"  - LightGBMクラス数: {self.lgbm_model.n_classes}")
         logger.info(f"  - 状態調整: {use_state_adjustment}")
+        logger.info(f"  - 押し目待ちモード: {wait_for_dip}")
 
     def fit(
         self,
@@ -185,17 +203,103 @@ class EnsembleModel:
 
         return result
 
+    def _check_dip_condition(self, df: pd.DataFrame) -> Tuple[bool, str]:
+        """
+        押し目（買い場）条件をチェック
+
+        Args:
+            df: 最新データ
+
+        Returns:
+            (押し目かどうか, 理由)
+        """
+        reasons = []
+
+        # RSIチェック
+        if 'rsi' in df.columns:
+            current_rsi = df['rsi'].iloc[-1]
+            if current_rsi < self.dip_config['rsi_threshold']:
+                reasons.append(f"RSI={current_rsi:.1f}<{self.dip_config['rsi_threshold']}")
+
+        # 20日MA乖離チェック
+        if 'sma20_distance' in df.columns:
+            sma_dist = df['sma20_distance'].iloc[-1]
+            if sma_dist < self.dip_config['sma_distance_threshold']:
+                reasons.append(f"MA乖離={sma_dist:.2%}")
+
+        # 5日リターンチェック
+        if 'return_5' in df.columns:
+            ret_5d = df['return_5'].iloc[-1]
+            if ret_5d < self.dip_config['return_5d_threshold']:
+                reasons.append(f"5日変化={ret_5d:.2%}")
+
+        is_dip = len(reasons) >= 1  # 1つ以上の条件を満たせば押し目
+        reason_str = ", ".join(reasons) if reasons else "条件なし"
+
+        return is_dip, reason_str
+
+    def _check_high_zone(self, df: pd.DataFrame) -> Tuple[bool, str]:
+        """
+        高値圏かどうかをチェック（押し目待ちすべきか判定）
+
+        Args:
+            df: 最新データ
+
+        Returns:
+            (高値圏かどうか, 理由)
+        """
+        reasons = []
+
+        # RSIが高い
+        if 'rsi' in df.columns:
+            current_rsi = df['rsi'].iloc[-1]
+            if current_rsi > 60:
+                reasons.append(f"RSI={current_rsi:.1f}>60")
+
+        # MAを大きく上回っている
+        if 'sma20_distance' in df.columns:
+            sma_dist = df['sma20_distance'].iloc[-1]
+            if sma_dist > 0.02:  # 2%以上上
+                reasons.append(f"MA+{sma_dist:.2%}")
+
+        # 直近で上がりすぎ
+        if 'return_5' in df.columns:
+            ret_5d = df['return_5'].iloc[-1]
+            if ret_5d > 0.03:  # 5日で3%以上上昇
+                reasons.append(f"5日+{ret_5d:.2%}")
+
+        is_high = len(reasons) >= 2  # 2つ以上で高値圏判定
+        reason_str = ", ".join(reasons) if reasons else ""
+
+        return is_high, reason_str
+
+    def _cleanup_expired_signals(self):
+        """期限切れの待機シグナルを削除"""
+        now = datetime.now()
+        expired = []
+
+        for symbol, sig in self.pending_signals.items():
+            age_hours = (now - sig['timestamp']).total_seconds() / 3600
+            if age_hours > self.dip_config['signal_expiry_hours']:
+                expired.append(symbol)
+
+        for symbol in expired:
+            logger.info(f"待機シグナル期限切れ: {symbol} (発生から{self.dip_config['signal_expiry_hours']}時間経過)")
+            del self.pending_signals[symbol]
+
     def generate_trading_signal(
         self,
         df: pd.DataFrame,
-        confidence_threshold: float = 0.6
+        confidence_threshold: float = 0.6,
+        symbol: str = 'BTC/JPY'
     ) -> Dict:
         """
-        売買シグナルを生成
+        売買シグナルを生成（押し目待ちモード対応）
 
         Args:
             df: 最新データ
             confidence_threshold: 売買判断の確率閾値
+            symbol: 取引ペア
 
         Returns:
             シグナル情報の辞書
@@ -203,30 +307,95 @@ class EnsembleModel:
         if not self.is_fitted:
             raise ValueError("モデルが学習されていません。")
 
+        # 期限切れシグナルを削除
+        self._cleanup_expired_signals()
+
         # 予測情報取得
         pred_info = self.predict_with_state_info(df)
 
-        # 売買シグナル判定
-        signal = 'HOLD'  # デフォルトはホールド
+        # 基本変数
+        signal = 'HOLD'
         confidence = 0.0
+        entry_type = 'none'
 
-        # 市場状態と方向性を総合判断
         state = pred_info['state']
         direction = pred_info['direction']
         direction_prob = pred_info['direction_probability']
 
-        # シグナル生成ロジック
+        # 押し目条件チェック
+        is_dip, dip_reason = self._check_dip_condition(df)
+        is_high, high_reason = self._check_high_zone(df)
+
+        # ========== 買いシグナル判定 ==========
         if direction == 2 and direction_prob > confidence_threshold:  # Up予測
-            # Bull状態または高確率の場合は買い
-            if state >= 1 or direction_prob > 0.7:  # state 1=Range, 2=Bull
-                signal = 'BUY'
-                confidence = direction_prob
+            if state >= 1 or direction_prob > 0.7:
+
+                # --- 強シグナル：即買い（押し目待たない）---
+                if direction_prob >= self.dip_config['strong_signal_threshold']:
+                    signal = 'BUY'
+                    confidence = direction_prob
+                    entry_type = 'strong_signal'
+                    logger.info(f"強シグナル即買い: {symbol} prob={direction_prob:.2%}")
+
+                # --- 押し目待ちモード ---
+                elif self.wait_for_dip:
+
+                    # 今が押し目なら買い
+                    if is_dip:
+                        signal = 'BUY'
+                        confidence = direction_prob * 1.05  # 押し目ボーナス
+                        entry_type = 'dip_buy'
+                        logger.info(f"押し目買い: {symbol} ({dip_reason})")
+
+                        # 待機シグナルがあれば消化
+                        if symbol in self.pending_signals:
+                            del self.pending_signals[symbol]
+
+                    # 高値圏なら待機リストに追加
+                    elif is_high:
+                        if symbol not in self.pending_signals:
+                            self.pending_signals[symbol] = {
+                                'timestamp': datetime.now(),
+                                'probability': direction_prob,
+                                'state': state,
+                                'price_level': df['close'].iloc[-1] if 'close' in df.columns else 0
+                            }
+                            logger.info(f"待機シグナル追加: {symbol} prob={direction_prob:.2%} ({high_reason})")
+                        signal = 'HOLD'
+                        entry_type = 'waiting_for_dip'
+
+                    # 中立圏：普通に買い
+                    else:
+                        signal = 'BUY'
+                        confidence = direction_prob
+                        entry_type = 'normal'
+
+                # --- 押し目待ちモード無効時 ---
+                else:
+                    signal = 'BUY'
+                    confidence = direction_prob
+                    entry_type = 'normal'
+
+        # ========== 待機シグナル消化チェック ==========
+        elif symbol in self.pending_signals and is_dip:
+            pending = self.pending_signals[symbol]
+            age_hours = (datetime.now() - pending['timestamp']).total_seconds() / 3600
+
+            # 待機シグナルがあり、押し目になったら買い
+            signal = 'BUY'
+            confidence = pending['probability'] * 1.05
+            entry_type = 'pending_dip_buy'
+            logger.info(f"待機シグナル発動: {symbol} ({dip_reason}) 待機{age_hours:.1f}時間")
+            del self.pending_signals[symbol]
+
+        # ========== 売りシグナル判定 ==========
         elif direction == 0 and direction_prob > confidence_threshold:  # Down予測
-            # Bear状態または高確率の場合は売り
-            if state == 0 or direction_prob > 0.7:  # state 0=Bear
+            if state == 0 or direction_prob > 0.7:
                 signal = 'SELL'
                 confidence = direction_prob
+                entry_type = 'sell_signal'
 
+        # 結果作成
         result = {
             'signal': signal,
             'confidence': confidence,
@@ -234,10 +403,14 @@ class EnsembleModel:
             'direction': pred_info['direction_label'],
             'state_prob': pred_info['state_probability'],
             'direction_prob': pred_info['direction_probability'],
-            'recommendation': self._generate_recommendation(signal, confidence, pred_info)
+            'entry_type': entry_type,
+            'is_dip': is_dip,
+            'dip_reason': dip_reason if is_dip else '',
+            'pending_signals': len(self.pending_signals),
+            'recommendation': self._generate_recommendation(signal, confidence, pred_info, entry_type)
         }
 
-        logger.info(f"売買シグナル生成: {signal} (確信度: {confidence:.2%})")
+        logger.info(f"売買シグナル: {signal} (確信度: {confidence:.2%}, タイプ: {entry_type})")
 
         return result
 
@@ -245,13 +418,23 @@ class EnsembleModel:
         self,
         signal: str,
         confidence: float,
-        pred_info: Dict
+        pred_info: Dict,
+        entry_type: str = 'normal'
     ) -> str:
         """推奨アクションを生成"""
         if signal == 'BUY':
-            return f"【買い推奨】市場状態: {pred_info['state_label']}, 上昇確率: {confidence:.1%}"
+            type_desc = {
+                'strong_signal': '強シグナル',
+                'dip_buy': '押し目買い',
+                'pending_dip_buy': '待機→押し目買い',
+                'normal': '通常'
+            }.get(entry_type, '')
+
+            return f"【買い推奨】{type_desc} 市場: {pred_info['state_label']}, 確率: {confidence:.1%}"
         elif signal == 'SELL':
             return f"【売り推奨】市場状態: {pred_info['state_label']}, 下降確率: {confidence:.1%}"
+        elif entry_type == 'waiting_for_dip':
+            return f"【押し目待ち】上昇予測あり、下がりを待機中 ({len(self.pending_signals)}件待機)"
         else:
             return f"【様子見】市場状態: {pred_info['state_label']}, 方向性不明"
 
@@ -368,7 +551,8 @@ class EnsembleModel:
 def create_ensemble_model(
     n_states: int = 3,
     n_classes: int = 3,
-    use_state_adjustment: bool = True
+    use_state_adjustment: bool = True,
+    wait_for_dip: bool = True
 ) -> EnsembleModel:
     """
     アンサンブルモデルを作成
@@ -377,10 +561,11 @@ def create_ensemble_model(
         n_states: HMMの状態数
         n_classes: LightGBMのクラス数
         use_state_adjustment: 状態調整を使用するか
+        wait_for_dip: 押し目待ちモードを使用するか
 
     Returns:
         EnsembleModelインスタンス
     """
     hmm = MarketRegimeHMM(n_states=n_states)
     lgbm = PriceDirectionLGBM(n_classes=n_classes)
-    return EnsembleModel(hmm, lgbm, use_state_adjustment)
+    return EnsembleModel(hmm, lgbm, use_state_adjustment, wait_for_dip)
