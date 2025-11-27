@@ -482,7 +482,8 @@ class CryptoTrader:
             try:
                 signal = self.ensemble_model.generate_trading_signal(
                     df,
-                    confidence_threshold=self.config.get('trading', {}).get('min_confidence', 0.6)
+                    confidence_threshold=self.config.get('trading', {}).get('min_confidence', 0.6),
+                    symbol=symbol
                 )
             except Exception as model_error:
                 logger.error(f"{symbol} モデル予測エラー: {model_error}")
