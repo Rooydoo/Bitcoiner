@@ -22,7 +22,9 @@ class RiskManager:
         consecutive_loss_limit: int = 5,  # 連続損失制限
         max_daily_loss_pct: float = 5.0,  # 日次最大損失（%）
         max_weekly_loss_pct: float = 10.0, # 週次最大損失（%）
-        max_monthly_loss_pct: float = 15.0 # 月次最大損失（%）
+        max_monthly_loss_pct: float = 15.0, # 月次最大損失（%）
+        margin_call_threshold: float = 0.8,  # 証拠金維持率警告しきい値（80%）
+        liquidation_threshold: float = 0.5   # 強制ロスカットしきい値（50%）
     ):
         """
         Args:
@@ -34,6 +36,8 @@ class RiskManager:
             max_daily_loss_pct: 日次最大損失率（%）
             max_weekly_loss_pct: 週次最大損失率（%）
             max_monthly_loss_pct: 月次最大損失率（%）
+            margin_call_threshold: 証拠金維持率警告しきい値（レバレッジ取引用）
+            liquidation_threshold: 強制ロスカットしきい値（レバレッジ取引用）
         """
         self.max_position_size = max_position_size
         self.stop_loss_pct = stop_loss_pct
@@ -43,6 +47,10 @@ class RiskManager:
         self.max_daily_loss_pct = max_daily_loss_pct
         self.max_weekly_loss_pct = max_weekly_loss_pct
         self.max_monthly_loss_pct = max_monthly_loss_pct
+
+        # レバレッジ関連
+        self.margin_call_threshold = margin_call_threshold
+        self.liquidation_threshold = liquidation_threshold
 
         # 段階的利益確定設定（要件定義書より）
         self.profit_levels = [
@@ -71,6 +79,8 @@ class RiskManager:
         logger.info(f"  - 日次最大損失: {max_daily_loss_pct}%")
         logger.info(f"  - 週次最大損失: {max_weekly_loss_pct}%")
         logger.info(f"  - 月次最大損失: {max_monthly_loss_pct}%")
+        logger.info(f"  - マージンコール警告: {margin_call_threshold:.0%}")
+        logger.info(f"  - ロスカットしきい値: {liquidation_threshold:.0%}")
 
     def check_stop_loss(
         self,
@@ -235,8 +245,12 @@ class RiskManager:
             quantity = 0.0
 
         # 最大ポジションサイズで制限
-        max_quantity = (available_capital * self.max_position_size) / current_price
-        quantity = min(quantity, max_quantity)
+        if current_price > 0:
+            max_quantity = (available_capital * self.max_position_size) / current_price
+            quantity = min(quantity, max_quantity)
+        else:
+            logger.warning("calculate_position_size_with_risk: current_price が無効です")
+            quantity = 0.0
 
         logger.info(f"リスクベースポジションサイズ: {quantity:.6f} "
                    f"(リスク額: ¥{risk_amount:,.0f})")
@@ -284,6 +298,54 @@ class RiskManager:
 
         return True, "OK"
 
+    def check_margin_status(
+        self,
+        position: Position,
+        current_price: float
+    ) -> Dict:
+        """
+        証拠金維持率をチェック（レバレッジ取引用）
+
+        Args:
+            position: ポジション
+            current_price: 現在価格
+
+        Returns:
+            証拠金状態の辞書
+        """
+        if not position.is_leveraged:
+            return {'status': 'spot', 'margin_ratio': 1.0, 'action': None}
+
+        margin_ratio = position.calculate_margin_ratio(current_price)
+        liquidation_price = position.get_liquidation_price(self.liquidation_threshold)
+
+        result = {
+            'status': 'normal',
+            'margin_ratio': margin_ratio,
+            'liquidation_price': liquidation_price,
+            'action': None
+        }
+
+        # ロスカット判定
+        if margin_ratio <= self.liquidation_threshold:
+            result['status'] = 'liquidation'
+            result['action'] = {
+                'action': 'liquidation',
+                'close_ratio': 1.0,
+                'reason': f'強制ロスカット（証拠金維持率: {margin_ratio:.1%}）'
+            }
+            logger.error(f"強制ロスカット！証拠金維持率: {margin_ratio:.1%} "
+                        f"(しきい値: {self.liquidation_threshold:.1%})")
+
+        # マージンコール判定
+        elif margin_ratio <= self.margin_call_threshold:
+            result['status'] = 'margin_call'
+            logger.warning(f"マージンコール警告！証拠金維持率: {margin_ratio:.1%} "
+                          f"(しきい値: {self.margin_call_threshold:.1%})")
+            logger.warning(f"  → ロスカット価格: ¥{liquidation_price:,.0f}")
+
+        return result
+
     def get_exit_action(
         self,
         position: Position,
@@ -299,6 +361,12 @@ class RiskManager:
         Returns:
             アクション情報の辞書（アクション不要の場合はNone）
         """
+        # レバレッジポジションの証拠金チェック（最優先）
+        if position.is_leveraged:
+            margin_status = self.check_margin_status(position, current_price)
+            if margin_status['action']:
+                return margin_status['action']
+
         # ストップロスチェック
         if self.check_stop_loss(position, current_price):
             return {
@@ -500,7 +568,9 @@ class RiskManager:
             'max_drawdown_pct': self.max_drawdown_pct,
             'profit_taking_enabled': self.profit_taking_enabled,
             'peak_equity': self.peak_equity,
-            'profit_levels': self.profit_levels
+            'profit_levels': self.profit_levels,
+            'margin_call_threshold': self.margin_call_threshold,
+            'liquidation_threshold': self.liquidation_threshold
         }
 
 

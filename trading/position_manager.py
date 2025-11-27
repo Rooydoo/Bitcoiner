@@ -21,7 +21,9 @@ class Position:
         entry_price: float,
         quantity: float,
         entry_time: Optional[datetime] = None,
-        position_id: Optional[str] = None
+        position_id: Optional[str] = None,
+        leverage: float = 1.0,
+        margin: float = 0.0
     ):
         """
         Args:
@@ -31,6 +33,8 @@ class Position:
             quantity: 数量
             entry_time: エントリー時刻
             position_id: ポジションID
+            leverage: レバレッジ倍率（デフォルト: 1.0 = 現物）
+            margin: 使用証拠金（レバレッジ取引時）
         """
         import uuid
         self.position_id = position_id or str(uuid.uuid4())
@@ -44,6 +48,11 @@ class Position:
         self.realized_pnl = 0.0
         self.status = 'open'  # 'open', 'closed'
 
+        # レバレッジ関連
+        self.leverage = max(1.0, leverage)  # 最低1倍
+        self.margin = margin if margin > 0 else (entry_price * quantity) / self.leverage
+        self.is_leveraged = self.leverage > 1.0 or symbol.startswith('FX_')
+
     def calculate_unrealized_pnl(self, current_price: float, commission_rate: float = 0.0015) -> float:
         """
         未実現損益を計算（手数料考慮）
@@ -54,19 +63,22 @@ class Position:
 
         Returns:
             未実現損益（手数料控除後）
+
+        Note:
+            エントリー時の手数料は注文執行時にbitFlyerで既に差し引かれているため、
+            ここでは決済時の手数料（見込み）のみを考慮する。
+            エントリー手数料を再度差し引くと二重計算になる。
         """
         if self.side == 'long':
             pnl = (current_price - self.entry_price) * self.quantity
         else:  # short
             pnl = (self.entry_price - current_price) * self.quantity
 
-        # エントリー時手数料（既に支払い済み）
-        entry_fee = self.entry_price * self.quantity * commission_rate
-        # 決済時手数料（未払い、見込み）
+        # 決済時手数料のみ考慮（エントリー時手数料は既に支払い済みのため除外）
         exit_fee = current_price * self.quantity * commission_rate
 
         # 手数料を差し引いた実質PnL
-        pnl_after_fees = pnl - entry_fee - exit_fee
+        pnl_after_fees = pnl - exit_fee
 
         return pnl_after_fees
 
@@ -101,6 +113,56 @@ class Position:
         logger.info(f"ポジションクローズ: {self.symbol} {self.side.upper()} "
                    f"損益=¥{self.realized_pnl:,.0f} ({self.calculate_unrealized_pnl_pct(exit_price):.2f}%)")
 
+    def calculate_margin_ratio(self, current_price: float) -> float:
+        """
+        証拠金維持率を計算（レバレッジ取引用）
+
+        Args:
+            current_price: 現在価格
+
+        Returns:
+            証拠金維持率（1.0 = 100%）
+        """
+        if not self.is_leveraged or self.margin <= 0:
+            return 1.0  # 現物は常に100%
+
+        # entry_priceが無効な場合のガード
+        if self.entry_price <= 0:
+            return 1.0
+
+        # 未実現損益（率）
+        if self.side == 'long':
+            pnl_ratio = (current_price - self.entry_price) / self.entry_price
+        else:
+            pnl_ratio = (self.entry_price - current_price) / self.entry_price
+
+        # 証拠金維持率 = (証拠金 + 評価損益) / 証拠金
+        adjusted_margin = self.margin * (1 + pnl_ratio * self.leverage)
+        margin_ratio = adjusted_margin / self.margin
+
+        return max(0.0, margin_ratio)
+
+    def get_liquidation_price(self, liquidation_threshold: float = 0.5) -> float:
+        """
+        ロスカット価格を計算
+
+        Args:
+            liquidation_threshold: ロスカットしきい値（デフォルト: 50%）
+
+        Returns:
+            ロスカット価格
+        """
+        if not self.is_leveraged:
+            return 0.0  # 現物はロスカットなし
+
+        # 証拠金維持率がしきい値になる価格を計算
+        loss_ratio = (1 - liquidation_threshold) / self.leverage
+
+        if self.side == 'long':
+            return self.entry_price * (1 - loss_ratio)
+        else:
+            return self.entry_price * (1 + loss_ratio)
+
     def to_dict(self) -> Dict:
         """辞書形式に変換"""
         return {
@@ -112,7 +174,10 @@ class Position:
             'exit_price': self.exit_price,
             'exit_time': self.exit_time.isoformat() if self.exit_time else None,
             'realized_pnl': self.realized_pnl,
-            'status': self.status
+            'status': self.status,
+            'leverage': self.leverage,
+            'margin': self.margin,
+            'is_leveraged': self.is_leveraged
         }
 
 
@@ -135,7 +200,9 @@ class PositionManager:
         symbol: str,
         side: str,
         entry_price: float,
-        quantity: float
+        quantity: float,
+        leverage: float = 1.0,
+        margin: float = 0.0
     ) -> Position:
         """
         新規ポジションを開く
@@ -145,6 +212,8 @@ class PositionManager:
             side: 'long' または 'short'
             entry_price: エントリー価格
             quantity: 数量
+            leverage: レバレッジ倍率（デフォルト: 1.0 = 現物）
+            margin: 使用証拠金
 
         Returns:
             Positionインスタンス
@@ -161,7 +230,12 @@ class PositionManager:
                         f"ショートポジションはFX_BTC_JPYのみ対応しています。")
             return None
 
-        position = Position(symbol, side, entry_price, quantity)
+        # レバレッジ検証: 現物市場ではレバレッジ不可
+        if leverage > 1.0 and not symbol.startswith('FX_'):
+            logger.warning(f"現物市場 {symbol} ではレバレッジは使用できません。1倍に設定します。")
+            leverage = 1.0
+
+        position = Position(symbol, side, entry_price, quantity, leverage=leverage, margin=margin)
         self.open_positions[symbol] = position
 
         # DBに保存
@@ -173,12 +247,15 @@ class PositionManager:
                 'entry_price': entry_price,
                 'entry_amount': quantity,
                 'entry_time': position.entry_time.isoformat(),
-                'status': 'open'
+                'status': 'open',
+                'leverage': leverage,
+                'margin': position.margin
             }
             self.db_manager.create_position(position_data)
 
+        leverage_info = f" (レバレッジ: {leverage}倍)" if leverage > 1.0 else ""
         logger.info(f"ポジションオープン: {symbol} {side.upper()} "
-                   f"{quantity:.6f} @ ¥{entry_price:,.0f}")
+                   f"{quantity:.6f} @ ¥{entry_price:,.0f}{leverage_info}")
 
         return position
 
@@ -347,14 +424,11 @@ class PositionManager:
         else:  # short
             partial_pnl = (position.entry_price - exit_price) * partial_quantity
 
-        # 手数料控除
-        # エントリー時手数料（部分比率分）
-        entry_fee = position.entry_price * partial_quantity * commission_rate
-        # 決済時手数料
+        # 決済時手数料のみ考慮（エントリー時手数料は既に支払い済み）
         exit_fee = exit_price * partial_quantity * commission_rate
 
         # 手数料控除後の実質PnL
-        partial_pnl_after_fees = partial_pnl - entry_fee - exit_fee
+        partial_pnl_after_fees = partial_pnl - exit_fee
 
         partial_pnl_pct = (partial_pnl_after_fees / (position.entry_price * partial_quantity)) * 100 if partial_quantity > 0 else 0.0
 
@@ -371,7 +445,7 @@ class PositionManager:
                 'price': exit_price,
                 'amount': partial_quantity,
                 'cost': exit_price * partial_quantity,
-                'fee': entry_fee + exit_fee,  # 総手数料
+                'fee': exit_fee,  # 決済時手数料のみ
                 'order_type': 'market',
                 'pnl': partial_pnl_after_fees,  # 手数料控除後
                 'timestamp': datetime.now().isoformat()
@@ -396,8 +470,7 @@ class PositionManager:
             'partial_pnl': partial_pnl_after_fees,  # 手数料控除後
             'partial_pnl_pct': partial_pnl_pct,
             'exit_price': exit_price,
-            'entry_fee': entry_fee,
-            'exit_fee': exit_fee
+            'exit_fee': exit_fee  # 決済時手数料のみ
         }
 
         return partial_close_info
@@ -439,7 +512,6 @@ class PositionManager:
             # トレード履歴にも記録
             from datetime import datetime
             commission_rate = 0.0015
-            entry_fee = position.entry_price * position.quantity * commission_rate
             exit_fee = exit_price * position.quantity * commission_rate
             trade_data = {
                 'symbol': symbol,
@@ -447,7 +519,7 @@ class PositionManager:
                 'price': exit_price,
                 'amount': position.quantity,
                 'cost': exit_price * position.quantity,
-                'fee': entry_fee + exit_fee,  # 総手数料（エントリー+決済）
+                'fee': exit_fee,  # 決済時手数料のみ（エントリー時は既に支払い済み）
                 'order_type': 'market',
                 'pnl': position.realized_pnl,  # 既に手数料控除済み
                 'timestamp': datetime.now().isoformat()
@@ -550,7 +622,7 @@ class PositionManager:
         holding_time = datetime.now() - position.entry_time
         holding_hours = holding_time.total_seconds() / 3600
 
-        return {
+        result = {
             'symbol': symbol,
             'side': position.side,
             'entry_price': position.entry_price,
@@ -559,8 +631,18 @@ class PositionManager:
             'unrealized_pnl': unrealized_pnl,
             'unrealized_pnl_pct': unrealized_pnl_pct,
             'holding_hours': holding_hours,
-            'entry_time': position.entry_time.isoformat()
+            'entry_time': position.entry_time.isoformat(),
+            'leverage': position.leverage,
+            'is_leveraged': position.is_leveraged
         }
+
+        # レバレッジ取引の場合は証拠金情報を追加
+        if position.is_leveraged:
+            result['margin'] = position.margin
+            result['margin_ratio'] = position.calculate_margin_ratio(current_price)
+            result['liquidation_price'] = position.get_liquidation_price()
+
+        return result
 
     def close_all_positions(self, current_prices: Dict[str, float]) -> List[Position]:
         """

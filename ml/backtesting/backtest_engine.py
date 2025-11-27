@@ -20,7 +20,8 @@ class BacktestEngine:
         initial_capital: float = 200000.0,  # 初期資金20万円
         position_size: float = 0.95,  # ポジションサイズ（資金の95%）
         commission_rate: float = 0.0015,  # 手数料率（bitFlyer: 0.15%）
-        slippage_rate: float = 0.0005  # スリッページ（0.05%）
+        slippage_rate: float = 0.0005,  # スリッページ（0.05%）
+        allow_short: bool = False  # ショートポジション許可（現物では不可）
     ):
         """
         初期化
@@ -30,11 +31,13 @@ class BacktestEngine:
             position_size: ポジションサイズ（0-1）
             commission_rate: 手数料率
             slippage_rate: スリッページ率
+            allow_short: ショートポジションを許可するか（FX以外の現物では不可）
         """
         self.initial_capital = initial_capital
         self.position_size = position_size
         self.commission_rate = commission_rate
         self.slippage_rate = slippage_rate
+        self.allow_short = allow_short
 
         # バックテスト結果
         self.trades = []
@@ -47,6 +50,7 @@ class BacktestEngine:
         logger.info(f"  - 初期資金: ¥{initial_capital:,.0f}")
         logger.info(f"  - ポジションサイズ: {position_size:.1%}")
         logger.info(f"  - 手数料率: {commission_rate:.2%}")
+        logger.info(f"  - ショート許可: {'はい' if allow_short else 'いいえ（現物モード）'}")
 
     def run_backtest(
         self,
@@ -94,8 +98,11 @@ class BacktestEngine:
                 self._open_position('BUY', price, i)
 
             elif signal == -1 and self.current_position is None:
-                # 売りシグナル & ポジションなし → 売り注文（ショート）
-                self._open_position('SELL', price, i)
+                # 売りシグナル & ポジションなし
+                if self.allow_short:
+                    # ショート許可時のみ売り注文（FXモード）
+                    self._open_position('SELL', price, i)
+                # 現物モードでは売りシグナルでポジションなしの場合は何もしない
 
             elif signal == -1 and self.current_position and self.current_position['side'] == 'BUY':
                 # 売りシグナル & 買いポジション保有 → 決済
@@ -131,16 +138,18 @@ class BacktestEngine:
         # 取引金額
         trade_amount = self.cash * self.position_size
 
-        # スリッページとコミッション
+        # スリッページ考慮
         if side == 'BUY':
             exec_price = price * (1 + self.slippage_rate)
         else:  # SELL
             exec_price = price * (1 - self.slippage_rate)
 
-        commission = trade_amount * self.commission_rate
+        # エントリー時手数料
+        entry_commission = trade_amount * self.commission_rate
 
-        # ポジション数量
-        quantity = (trade_amount - commission) / exec_price
+        # 手数料を差し引いた金額でポジション数量を計算
+        net_trade_amount = trade_amount - entry_commission
+        quantity = net_trade_amount / exec_price
 
         # ポジション記録
         self.current_position = {
@@ -148,20 +157,21 @@ class BacktestEngine:
             'entry_price': exec_price,
             'entry_index': index,
             'quantity': quantity,
-            'commission': commission
+            'entry_commission': entry_commission,
+            'trade_amount': trade_amount
         }
 
-        # キャッシュ更新
-        self.cash -= (trade_amount + commission)
+        # キャッシュ更新（手数料込みの取引金額を差し引く）
+        self.cash -= trade_amount
 
-        logger.debug(f"ポジションオープン: {side} {quantity:.4f}単位 @ ¥{exec_price:,.0f}")
+        logger.debug(f"ポジションオープン: {side} {quantity:.4f}単位 @ ¥{exec_price:,.0f} (手数料: ¥{entry_commission:,.0f})")
 
     def _close_position(self, price: float, index: int):
         """ポジションを閉じる"""
         if not self.current_position:
             return
 
-        # スリッページとコミッション
+        # スリッページ考慮
         if self.current_position['side'] == 'BUY':
             exec_price = price * (1 - self.slippage_rate)
         else:  # SELL
@@ -169,16 +179,21 @@ class BacktestEngine:
 
         quantity = self.current_position['quantity']
         trade_value = quantity * exec_price
-        commission = trade_value * self.commission_rate
+        exit_commission = trade_value * self.commission_rate
 
-        # 損益計算
+        # 損益計算（エントリー・エグジット両方の手数料を考慮）
+        entry_commission = self.current_position['entry_commission']
         if self.current_position['side'] == 'BUY':
-            pnl = (exec_price - self.current_position['entry_price']) * quantity - commission - self.current_position['commission']
+            gross_pnl = (exec_price - self.current_position['entry_price']) * quantity
         else:  # SELL
-            pnl = (self.current_position['entry_price'] - exec_price) * quantity - commission - self.current_position['commission']
+            gross_pnl = (self.current_position['entry_price'] - exec_price) * quantity
 
-        # キャッシュ更新
-        self.cash += trade_value - commission
+        # 総手数料を差し引いた純損益
+        total_commission = entry_commission + exit_commission
+        pnl = gross_pnl - exit_commission  # エントリー手数料は既にtrade_amountから差し引き済み
+
+        # キャッシュ更新（決済金額から決済手数料を差し引く）
+        self.cash += trade_value - exit_commission
 
         # 取引記録
         trade_record = {
@@ -189,13 +204,14 @@ class BacktestEngine:
             'exit_index': index,
             'quantity': quantity,
             'pnl': pnl,
-            'pnl_pct': (pnl / (self.current_position['entry_price'] * quantity)) * 100,
-            'holding_period': index - self.current_position['entry_index']
+            'pnl_pct': (pnl / self.current_position['trade_amount']) * 100,  # 投資額に対する損益率
+            'holding_period': index - self.current_position['entry_index'],
+            'total_commission': total_commission
         }
 
         self.trades.append(trade_record)
 
-        logger.debug(f"ポジションクローズ: {self.current_position['side']} @ ¥{exec_price:,.0f}, PnL=¥{pnl:,.0f}")
+        logger.debug(f"ポジションクローズ: {self.current_position['side']} @ ¥{exec_price:,.0f}, PnL=¥{pnl:,.0f} (手数料: ¥{total_commission:,.0f})")
 
         # ポジションクリア
         self.current_position = None
@@ -338,7 +354,8 @@ class BacktestEngine:
 def create_backtest_engine(
     initial_capital: float = 200000.0,
     position_size: float = 0.95,
-    commission_rate: float = 0.0015
+    commission_rate: float = 0.0015,
+    allow_short: bool = False
 ) -> BacktestEngine:
     """
     バックテストエンジンを作成
@@ -347,6 +364,7 @@ def create_backtest_engine(
         initial_capital: 初期資金
         position_size: ポジションサイズ
         commission_rate: 手数料率
+        allow_short: ショートポジションを許可するか（デフォルト: False = 現物モード）
 
     Returns:
         BacktestEngineインスタンス
@@ -354,5 +372,6 @@ def create_backtest_engine(
     return BacktestEngine(
         initial_capital=initial_capital,
         position_size=position_size,
-        commission_rate=commission_rate
+        commission_rate=commission_rate,
+        allow_short=allow_short
     )

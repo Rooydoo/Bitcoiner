@@ -27,7 +27,8 @@ class OrderExecutor:
         self,
         api_key: Optional[str] = None,
         api_secret: Optional[str] = None,
-        test_mode: bool = True
+        test_mode: bool = True,
+        leverage_config: Optional[Dict] = None
     ):
         """
         初期化
@@ -36,9 +37,26 @@ class OrderExecutor:
             api_key: bitFlyer APIキー
             api_secret: bitFlyer APIシークレット
             test_mode: テストモード（実際の注文を実行しない）
+            leverage_config: レバレッジ設定（Noneの場合は現物取引）
         """
         self.test_mode = test_mode
         self.exchange = None
+
+        # レバレッジ設定（デフォルトは現物取引 = 1倍）
+        self.leverage_enabled = False
+        self.max_leverage = 1.0
+        self.fx_symbol = 'FX_BTC_JPY'
+        self.margin_call_threshold = 0.8
+        self.liquidation_threshold = 0.5
+        self.allow_short = False
+
+        if leverage_config:
+            self.leverage_enabled = leverage_config.get('enabled', False)
+            self.max_leverage = leverage_config.get('max_leverage', 2.0)
+            self.fx_symbol = leverage_config.get('fx_symbol', 'FX_BTC_JPY')
+            self.margin_call_threshold = leverage_config.get('margin_call_threshold', 0.8)
+            self.liquidation_threshold = leverage_config.get('liquidation_threshold', 0.5)
+            self.allow_short = leverage_config.get('allow_short', False)
 
         if api_key and api_secret:
             try:
@@ -55,7 +73,8 @@ class OrderExecutor:
         else:
             logger.warning("APIキー未設定 - テストモードで動作")
 
-        logger.info(f"注文実行モジュール初期化（テストモード: {test_mode}）")
+        leverage_status = f"{self.max_leverage}倍" if self.leverage_enabled else "無効（現物取引）"
+        logger.info(f"注文実行モジュール初期化（テストモード: {test_mode}, レバレッジ: {leverage_status}）")
 
     # ========== リトライ付きAPI呼び出しヘルパー ==========
 
@@ -296,8 +315,9 @@ class OrderExecutor:
         if self.test_mode:
             # テストモード: ダミー価格
             mock_prices = {
-                'BTC/JPY': 12000000.0,  # 1200万円
-                'ETH/JPY': 500000.0      # 50万円
+                'BTC/JPY': 12000000.0,   # 1200万円
+                'ETH/JPY': 500000.0,     # 50万円
+                'FX_BTC_JPY': 12050000.0  # FX価格（現物より若干高め）
             }
             return mock_prices.get(symbol, 100000.0)
 
@@ -318,7 +338,7 @@ class OrderExecutor:
         position_ratio: float = 0.95
     ) -> float:
         """
-        ポジションサイズを計算
+        ポジションサイズを計算（エントリー・エグジット両方の手数料を考慮）
 
         Args:
             symbol: 取引ペア
@@ -327,6 +347,11 @@ class OrderExecutor:
 
         Returns:
             購入可能数量
+
+        Note:
+            エントリー時とエグジット時の両方で手数料がかかるため、
+            両方を考慮してポジションサイズを計算する。
+            これにより、決済時に資金不足になることを防ぐ。
         """
         current_price = self.get_current_price(symbol)
 
@@ -338,17 +363,158 @@ class OrderExecutor:
         trade_capital = available_capital * position_ratio
         commission_rate = 0.0015  # bitFlyer手数料
 
-        # 手数料を考慮した購入可能数量
-        # 正しい計算: quantity * price * (1 + commission) <= capital
-        quantity = trade_capital / (current_price * (1 + commission_rate))
+        # エントリー・エグジット両方の手数料を考慮
+        # エントリー時: quantity * price * (1 + commission)
+        # エグジット時: quantity * price * commission（最悪の場合を想定）
+        # 合計: quantity * price * (1 + 2 * commission) <= capital
+        total_commission_factor = 1 + (2 * commission_rate)
+        quantity = trade_capital / (current_price * total_commission_factor)
 
         # 精度調整（8桁に丸める）
         quantity = round(quantity, 8)
 
+        entry_cost = quantity * current_price * (1 + commission_rate)
         logger.info(f"ポジションサイズ計算: {quantity:.6f} {symbol.split('/')[0]} "
-                   f"(資金: ¥{available_capital:,.0f}, 価格: ¥{current_price:,.0f})")
+                   f"(資金: ¥{available_capital:,.0f}, 価格: ¥{current_price:,.0f}, "
+                   f"予想コスト: ¥{entry_cost:,.0f})")
 
         return quantity
+
+    def calculate_leveraged_position_size(
+        self,
+        available_capital: float,
+        leverage: float = 1.0,
+        position_ratio: float = 0.95
+    ) -> Dict:
+        """
+        レバレッジ取引用のポジションサイズを計算
+
+        Args:
+            available_capital: 利用可能証拠金
+            leverage: レバレッジ倍率（1.0-2.0）
+            position_ratio: ポジション比率（0-1）
+
+        Returns:
+            ポジション情報（数量、証拠金、レバレッジ等）
+
+        Note:
+            - レバレッジ無効時は現物取引として計算（レバレッジ1倍）
+            - ペアトレードでは常にレバレッジ1倍を使用
+        """
+        # レバレッジの有効性チェック
+        if not self.leverage_enabled:
+            leverage = 1.0
+            logger.debug("レバレッジ無効 - 現物取引モードで計算")
+
+        # レバレッジ上限チェック
+        leverage = min(leverage, self.max_leverage)
+        leverage = max(leverage, 1.0)
+
+        # FX価格を取得
+        fx_price = self.get_current_price(self.fx_symbol)
+        if not fx_price or fx_price <= 0:
+            logger.error(f"FX価格取得失敗: {self.fx_symbol}")
+            return None
+
+        # 証拠金計算
+        margin_capital = available_capital * position_ratio
+        commission_rate = 0.0015  # bitFlyer手数料
+
+        # レバレッジを考慮した購入力
+        buying_power = margin_capital * leverage
+
+        # 手数料を考慮した数量計算
+        total_commission_factor = 1 + (2 * commission_rate)
+        quantity = buying_power / (fx_price * total_commission_factor)
+        quantity = round(quantity, 8)
+
+        # 必要証拠金
+        required_margin = (quantity * fx_price) / leverage
+        # ロスカット価格（買いポジションの場合）
+        liquidation_price = fx_price * (1 - (self.liquidation_threshold / leverage))
+
+        result = {
+            'symbol': self.fx_symbol,
+            'quantity': quantity,
+            'leverage': leverage,
+            'margin': required_margin,
+            'buying_power': buying_power,
+            'entry_price': fx_price,
+            'liquidation_price': liquidation_price,
+            'margin_call_price': fx_price * (1 - (self.margin_call_threshold - 0.5) / leverage)
+        }
+
+        logger.info(f"レバレッジポジション計算: {quantity:.6f} BTC "
+                   f"(レバレッジ: {leverage}倍, 証拠金: ¥{required_margin:,.0f}, "
+                   f"ロスカット: ¥{liquidation_price:,.0f})")
+
+        return result
+
+    def get_margin_status(self, position_value: float, margin: float, current_price: float, entry_price: float, side: str = 'long') -> Dict:
+        """
+        証拠金維持率と状態を取得
+
+        Args:
+            position_value: ポジション価値（数量 × 価格）
+            margin: 使用証拠金
+            current_price: 現在価格
+            entry_price: エントリー価格
+            side: ポジション方向（'long' or 'short'）
+
+        Returns:
+            証拠金状態の辞書
+        """
+        if margin <= 0:
+            return {'margin_ratio': 1.0, 'status': 'no_position', 'unrealized_pnl': 0}
+
+        # entry_priceが0または無効な場合のガード
+        if entry_price <= 0:
+            logger.warning("get_margin_status: entry_price が無効です")
+            return {'margin_ratio': 1.0, 'status': 'error', 'unrealized_pnl': 0}
+
+        # 未実現損益計算
+        if side == 'long':
+            unrealized_pnl = (current_price - entry_price) / entry_price
+        else:
+            unrealized_pnl = (entry_price - current_price) / entry_price
+
+        # 証拠金維持率 = (証拠金 + 評価損益) / 証拠金
+        adjusted_margin = margin * (1 + unrealized_pnl)
+        margin_ratio = adjusted_margin / margin
+
+        # 状態判定
+        if margin_ratio <= self.liquidation_threshold:
+            status = 'liquidation'
+        elif margin_ratio <= self.margin_call_threshold:
+            status = 'margin_call'
+        else:
+            status = 'normal'
+
+        return {
+            'margin_ratio': margin_ratio,
+            'status': status,
+            'unrealized_pnl': unrealized_pnl,
+            'adjusted_margin': adjusted_margin
+        }
+
+    def is_fx_symbol(self, symbol: str) -> bool:
+        """FX取引ペアかどうかを判定"""
+        return symbol.startswith('FX_')
+
+    def get_effective_symbol(self, base_symbol: str, use_leverage: bool = False) -> str:
+        """
+        実際に使用するシンボルを取得
+
+        Args:
+            base_symbol: 基本シンボル（例: 'BTC/JPY'）
+            use_leverage: レバレッジを使用するか
+
+        Returns:
+            使用するシンボル（レバレッジ有効時はFXシンボル）
+        """
+        if use_leverage and self.leverage_enabled and 'BTC' in base_symbol:
+            return self.fx_symbol
+        return base_symbol
 
     def _create_mock_order(
         self,

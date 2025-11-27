@@ -56,6 +56,15 @@ trading:
   min_confidence: 0.6          # 最小シグナル信頼度（60%以上でエントリー）
   trading_interval_minutes: 5  # 取引サイクル間隔（分）
 
+# レバレッジ設定
+leverage:
+  enabled: false               # レバレッジ取引を有効化（デフォルト: 無効 = 現物取引）
+  max_leverage: 2.0            # 最大レバレッジ倍率（bitFlyer FXは最大2倍）
+  fx_symbol: FX_BTC_JPY        # FX取引ペア（レバレッジ有効時に使用）
+  margin_call_threshold: 0.8   # 証拠金維持率警告しきい値（80%）
+  liquidation_threshold: 0.5   # 強制ロスカットしきい値（50%）
+  allow_short: false           # ショートポジション許可（レバレッジ有効時のみ有効）
+
 # 戦略配分設定
 strategy_allocation:
   crypto_ratio: 0.50           # 総資金のうちコイン投資に使う割合（50%）

@@ -109,7 +109,22 @@ class CryptoTrader:
 
         # Phase 3: 取引エンジン初期化
         logger.info("\n[Phase 3] 取引エンジン初期化")
-        self.order_executor = OrderExecutor(test_mode=test_mode)
+
+        # レバレッジ設定を読み込み（デフォルトは現物取引）
+        leverage_config = self.config.get('leverage', {
+            'enabled': False,
+            'max_leverage': 2.0,
+            'fx_symbol': 'FX_BTC_JPY',
+            'margin_call_threshold': 0.8,
+            'liquidation_threshold': 0.5,
+            'allow_short': False
+        })
+        self.leverage_config = leverage_config
+
+        self.order_executor = OrderExecutor(
+            test_mode=test_mode,
+            leverage_config=leverage_config
+        )
         self.position_manager = PositionManager(self.db_manager)
 
         # 設定値の安全性強制（危険な値を安全な範囲に修正）
@@ -123,7 +138,9 @@ class CryptoTrader:
             consecutive_loss_limit=risk_config.get('consecutive_loss_limit', 5),
             max_daily_loss_pct=risk_config.get('max_daily_loss_pct', 5.0),
             max_weekly_loss_pct=risk_config.get('max_weekly_loss_pct', 10.0),
-            max_monthly_loss_pct=risk_config.get('max_monthly_loss_pct', 15.0)
+            max_monthly_loss_pct=risk_config.get('max_monthly_loss_pct', 15.0),
+            margin_call_threshold=leverage_config.get('margin_call_threshold', 0.8),
+            liquidation_threshold=leverage_config.get('liquidation_threshold', 0.5)
         )
 
         # ペアトレーディング戦略初期化（設定ファイルから読み込み）
@@ -180,6 +197,10 @@ class CryptoTrader:
         self.is_running = False
         self.last_prediction_time = {}
         self.models_loaded = False
+
+        # 資産管理（API同期用）
+        self._current_capital = self.config.get('trading', {}).get('initial_capital', 200000)
+        self._last_capital_sync = None
 
         logger.info("\n" + "=" * 70)
         logger.info("CryptoTrader 初期化完了")
@@ -755,7 +776,7 @@ class CryptoTrader:
                 signal_confidence=signal['confidence'],
                 min_confidence=self.config.get('trading', {}).get('min_confidence', 0.6),
                 current_equity=available_capital,
-                initial_capital=self.config.get('trading', {}).get('initial_capital', 200000)
+                initial_capital=self._current_capital  # API同期済みの資産を使用
             )
 
             if not should_enter:
@@ -906,8 +927,7 @@ class CryptoTrader:
                     logger.info(f"    部分損益: ¥{partial_info['partial_pnl']:,.0f} ({partial_info['partial_pnl_pct']:+.2f}%)")
 
                     # リスク管理に取引結果を記録（部分決済）
-                    initial_capital = self.config.get('trading', {}).get('initial_capital', 200000)
-                    self.risk_manager.record_trade_result(partial_info['partial_pnl'], initial_capital)
+                    self.risk_manager.record_trade_result(partial_info['partial_pnl'], self._current_capital)
 
                     # Telegram通知
                     self.notifier.notify_take_profit(
@@ -957,8 +977,7 @@ class CryptoTrader:
                     logger.info(f"    実現損益: ¥{pnl:,.0f} ({pnl_pct:+.2f}%)")
 
                     # リスク管理に取引結果を記録
-                    initial_capital = self.config.get('trading', {}).get('initial_capital', 200000)
-                    self.risk_manager.record_trade_result(pnl, initial_capital)
+                    self.risk_manager.record_trade_result(pnl, self._current_capital)
 
                     # 利益確定トラッキングをリセット
                     self.risk_manager.reset_profit_tracking(symbol)
@@ -1274,8 +1293,7 @@ class CryptoTrader:
                 )
 
             # リスク管理に記録
-            initial_capital = self.config.get('trading', {}).get('initial_capital', 200000)
-            self.risk_manager.record_trade_result(pnl, initial_capital)
+            self.risk_manager.record_trade_result(pnl, self._current_capital)
 
             # Telegram通知
             self.notifier.notify_pair_trade_close(
@@ -1296,6 +1314,14 @@ class CryptoTrader:
         logger.info("\n" + "=" * 70)
         logger.info(f"取引サイクル開始: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info("=" * 70)
+
+        # 定期的な資産同期（1時間ごと）
+        if not self.test_mode:
+            self._update_capital_periodic()
+
+        # ポジション整合性チェック（手動売却検出）
+        if not self.test_mode:
+            self._reconcile_positions()
 
         # 自動再開チェック（24時間経過で自動的に取引再開）
         if self.risk_manager.check_auto_resume():
@@ -1482,6 +1508,264 @@ class CryptoTrader:
             logger.warning(f"  ⚠ 残高検証エラー: {e}")
             logger.warning(f"  検証をスキップして続行します")
 
+    def _sync_capital_from_api(self) -> bool:
+        """APIから総資産を取得してinitial_capitalを自動同期
+
+        JPY残高 + 保有コインの時価評価額を計算し、
+        内部のinitial_capitalを更新する
+
+        Returns:
+            同期成功した場合True
+        """
+        try:
+            logger.info("\n[資産同期] bitFlyer APIから総資産を取得中...")
+
+            # 取引所の残高を取得
+            balance = self.data_collector.fetch_balance()
+
+            if balance is None:
+                logger.error("  ✗ 残高取得失敗")
+                return False
+
+            # JPY残高（現金）
+            jpy_free = balance.get('JPY', {}).get('free', 0)
+            jpy_used = balance.get('JPY', {}).get('used', 0)
+            jpy_total = jpy_free + jpy_used
+
+            logger.info(f"  💴 JPY残高: ¥{jpy_total:,.0f} (利用可能: ¥{jpy_free:,.0f})")
+
+            # 暗号資産の時価評価額を計算
+            crypto_value = 0.0
+            crypto_holdings = []
+
+            for symbol in ['BTC', 'ETH', 'XRP', 'LTC', 'BCH']:
+                if symbol in balance:
+                    crypto_free = balance[symbol].get('free', 0)
+                    crypto_used = balance[symbol].get('used', 0)
+                    crypto_total = crypto_free + crypto_used
+
+                    if crypto_total > 0:
+                        try:
+                            # 現在価格取得
+                            ticker = self.data_collector.fetch_ticker(f'{symbol}/JPY')
+                            if ticker:
+                                current_price = ticker.get('last', 0)
+                                value = crypto_total * current_price
+                                crypto_value += value
+                                crypto_holdings.append({
+                                    'symbol': symbol,
+                                    'amount': crypto_total,
+                                    'price': current_price,
+                                    'value': value
+                                })
+                                logger.info(f"  🪙 {symbol}: {crypto_total:.6f} × ¥{current_price:,.0f} = ¥{value:,.0f}")
+                        except Exception as e:
+                            logger.warning(f"  ⚠ {symbol} 価格取得失敗: {e}")
+
+            # 総資産計算
+            total_assets = jpy_total + crypto_value
+
+            # 設定ファイルの値と比較
+            config_capital = self.config.get('trading', {}).get('initial_capital', 200000)
+
+            logger.info("  " + "-" * 40)
+            logger.info(f"  💰 総資産: ¥{total_assets:,.0f}")
+            logger.info(f"     ├ 現金: ¥{jpy_total:,.0f}")
+            logger.info(f"     └ コイン時価: ¥{crypto_value:,.0f}")
+            logger.info(f"  📋 設定値: ¥{config_capital:,.0f}")
+
+            # 差異を計算
+            if config_capital > 0:
+                difference = total_assets - config_capital
+                difference_pct = (difference / config_capital) * 100
+                logger.info(f"  📊 差異: ¥{difference:+,.0f} ({difference_pct:+.1f}%)")
+
+            # 内部変数を更新
+            old_capital = self._current_capital
+            self._current_capital = total_assets
+            self._last_capital_sync = datetime.now()
+
+            logger.info("  " + "-" * 40)
+            logger.info(f"  ✓ 資産同期完了: ¥{old_capital:,.0f} → ¥{total_assets:,.0f}")
+
+            # Telegram通知（大きな差異がある場合）
+            if config_capital > 0 and abs(difference_pct) > 10:
+                try:
+                    self.notifier.send_message(
+                        f"📊 *資産同期完了*\n\n"
+                        f"総資産: ¥{total_assets:,.0f}\n"
+                        f"├ 現金: ¥{jpy_total:,.0f}\n"
+                        f"└ コイン: ¥{crypto_value:,.0f}\n\n"
+                        f"設定値との差異: {difference_pct:+.1f}%"
+                    )
+                except Exception:
+                    pass
+
+            return True
+
+        except Exception as e:
+            logger.error(f"  ✗ 資産同期エラー: {e}")
+            logger.error(traceback.format_exc())
+            return False
+
+    def get_current_capital(self) -> float:
+        """現在の総資産を取得
+
+        Returns:
+            現在の総資産（最後に同期した値）
+        """
+        return self._current_capital
+
+    def _update_capital_periodic(self):
+        """定期的な資産更新（取引サイクル中に呼び出し）
+
+        1時間以上経過している場合のみ更新を実行
+        """
+        if self._last_capital_sync is None:
+            return
+
+        elapsed = (datetime.now() - self._last_capital_sync).total_seconds()
+
+        # 1時間以上経過していれば更新
+        if elapsed >= 3600:
+            logger.info("\n[定期資産更新] 1時間経過 - 資産を再同期します")
+            self._sync_capital_from_api()
+
+    def _reconcile_positions(self):
+        """ポジション状態とAPI残高の整合性をチェック
+
+        システムが保有していると認識しているポジションと、
+        実際のbitFlyer残高を比較し、不整合があれば修正する。
+        （手動売却などを検出）
+        """
+        if self.test_mode:
+            return  # テストモードでは実行しない
+
+        try:
+            logger.info("\n[ポジション整合性チェック] 実残高と照合中...")
+
+            # 現在のオープンポジションを取得
+            open_positions = self.position_manager.get_all_positions()
+
+            if not open_positions:
+                logger.info("  ✓ オープンポジションなし - チェック不要")
+                return
+
+            # API残高を取得
+            balance = self.data_collector.fetch_balance()
+            if balance is None:
+                logger.warning("  ⚠ 残高取得失敗 - チェックスキップ")
+                return
+
+            positions_to_clear = []
+
+            for symbol, position in open_positions.items():
+                # 通貨コードを抽出（BTC/JPY → BTC）
+                base_currency = symbol.split('/')[0]
+
+                # 実際の残高を取得
+                actual_free = balance.get(base_currency, {}).get('free', 0)
+                actual_used = balance.get(base_currency, {}).get('used', 0)
+                actual_total = actual_free + actual_used
+
+                # システム上のポジション数量
+                system_quantity = position.quantity
+
+                # 不整合チェック（10%以上の差異で検出）
+                if actual_total < system_quantity * 0.9:
+                    logger.warning(f"  ⚠ 不整合検出: {symbol}")
+                    logger.warning(f"    システム上: {system_quantity:.6f} {base_currency}")
+                    logger.warning(f"    実残高:     {actual_total:.6f} {base_currency}")
+
+                    if actual_total < system_quantity * 0.1:
+                        # ほぼ全量売却されている場合
+                        logger.warning(f"    → 手動売却と判断 - ポジションをクリアします")
+                        positions_to_clear.append({
+                            'symbol': symbol,
+                            'position': position,
+                            'actual_amount': actual_total,
+                            'reason': '手動売却検出'
+                        })
+                    else:
+                        # 一部売却の場合
+                        logger.warning(f"    → 部分的な手動売却を検出 - 数量を調整します")
+                        # ポジション数量を実残高に合わせて調整
+                        old_quantity = position.quantity
+                        position.quantity = actual_total
+                        logger.info(f"    数量調整: {old_quantity:.6f} → {actual_total:.6f}")
+
+                        # Telegram通知
+                        try:
+                            self.notifier.send_message(
+                                f"⚠ *ポジション調整*\n\n"
+                                f"通貨: {symbol}\n"
+                                f"理由: 手動売却検出（部分）\n"
+                                f"調整: {old_quantity:.6f} → {actual_total:.6f}"
+                            )
+                        except Exception:
+                            pass
+                else:
+                    logger.info(f"  ✓ {symbol}: 整合性OK ({actual_total:.6f} {base_currency})")
+
+            # 不整合ポジションをクリア
+            for item in positions_to_clear:
+                symbol = item['symbol']
+                position = item['position']
+
+                # 現在価格を取得
+                try:
+                    ticker = self.data_collector.fetch_ticker(symbol)
+                    current_price = ticker.get('last', position.entry_price) if ticker else position.entry_price
+                except Exception:
+                    current_price = position.entry_price
+
+                # 損益を推定（売却価格は不明なため、現在価格で推定）
+                estimated_pnl = position.calculate_unrealized_pnl(current_price)
+
+                # ポジションを強制クローズ（メモリとDBから削除）
+                if symbol in self.position_manager.open_positions:
+                    del self.position_manager.open_positions[symbol]
+
+                # DBを更新
+                if self.position_manager.db_manager:
+                    try:
+                        self.position_manager.db_manager.update_position(
+                            position.position_id,
+                            {
+                                'status': 'closed_manual',
+                                'exit_price': current_price,
+                                'exit_time': datetime.now().isoformat()
+                            }
+                        )
+                    except Exception as db_error:
+                        logger.warning(f"  ⚠ DB更新失敗: {db_error}")
+
+                # 利益確定トラッキングをリセット
+                self.risk_manager.reset_profit_tracking(symbol)
+
+                logger.info(f"  ✓ ポジションクリア完了: {symbol}")
+                logger.info(f"    推定損益: ¥{estimated_pnl:,.0f}")
+
+                # Telegram通知
+                try:
+                    self.notifier.send_message(
+                        f"⚠ *手動売却検出*\n\n"
+                        f"通貨: {symbol}\n"
+                        f"数量: {position.quantity:.6f}\n"
+                        f"エントリー価格: ¥{position.entry_price:,.0f}\n"
+                        f"推定損益: ¥{estimated_pnl:,.0f}\n\n"
+                        f"ポジションをクリアしました。"
+                    )
+                except Exception:
+                    pass
+
+            if positions_to_clear:
+                logger.info(f"\n  合計 {len(positions_to_clear)} 件のポジションをクリアしました")
+
+        except Exception as e:
+            logger.error(f"  ✗ ポジション整合性チェックエラー: {e}")
+            logger.error(traceback.format_exc())
+
     def start(self, interval_minutes: int = 5):
         """取引ボット開始
 
@@ -1517,10 +1801,13 @@ class CryptoTrader:
         # モデル読み込み
         self.load_models()
 
-        # 資産残高検証（本番モードのみ）
+        # 資産同期（本番モードのみ）
         if not self.test_mode:
-            logger.info("\n[資産検証] 取引所残高確認中...")
-            self._verify_initial_balance()
+            # APIから総資産を取得して同期
+            if not self._sync_capital_from_api():
+                logger.warning("  ⚠ API同期失敗 - 設定ファイルの値を使用します")
+        else:
+            logger.info("\n[テストモード] 資産同期スキップ - 設定値を使用")
 
         # Telegram Bot起動（コマンド受信用）
         self.telegram_bot.start()
