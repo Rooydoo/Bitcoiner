@@ -23,33 +23,50 @@ from ml.models.hmm_model import MarketRegimeHMM
 from ml.models.lightgbm_model import PriceDirectionLGBM
 from ml.training.feature_engineering import FeatureEngineer
 from data.processor.indicators import TechnicalIndicators
-from data.collector.bitflyer_api import BitflyerDataCollector
+from data.collector.binance_api import BinanceDataCollector
 from utils.logger import setup_logger
 
 # ロガー設定
 logger = setup_logger('walk_forward', 'walk_forward.log')
 
+# シンボルマッピング: bitFlyer(JPY) → Binance(USDT)
+SYMBOL_MAPPING = {
+    'BTC/JPY': 'BTC/USDT',
+    'ETH/JPY': 'ETH/USDT',
+    'XRP/JPY': 'XRP/USDT',
+    'LTC/JPY': 'LTC/USDT',
+}
+
 
 def prepare_data(symbol: str, days: int = 730) -> pd.DataFrame:
-    """データ準備"""
+    """データ準備（Binance APIを使用）"""
     logger.info(f"データ取得中: {symbol} ({days}日分)")
 
-    collector = BitflyerDataCollector()
+    # Binanceからデータ取得
+    collector = BinanceDataCollector()
     feature_engineer = FeatureEngineer()
 
-    # OHLCVデータ取得（1時間足）
-    limit = days * 24
-    ohlcv = collector.fetch_ohlcv(symbol, '1h', limit)
+    # シンボル変換
+    binance_symbol = SYMBOL_MAPPING.get(symbol, symbol.replace('/JPY', '/USDT'))
+    logger.info(f"  Binance使用: {binance_symbol}")
 
-    if ohlcv is None or len(ohlcv) < 100:
+    # OHLCVデータ取得（1時間足）
+    from datetime import timedelta
+    start_date = datetime.now() - timedelta(days=days)
+    df = collector.fetch_ohlcv_bulk(
+        symbol=binance_symbol,
+        timeframe='1h',
+        start_date=start_date,
+        batch_size=1000
+    )
+
+    if df is None or len(df) < 100:
         raise ValueError(f"データ取得失敗: {symbol}")
 
-    # DataFrame作成
-    df = pd.DataFrame(
-        ohlcv,
-        columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
-    )
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    logger.info(f"  データ取得完了: {len(df)}本")
+
+    # タイムスタンプを変換
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
 
     # テクニカル指標計算
     logger.info("テクニカル指標計算中...")
