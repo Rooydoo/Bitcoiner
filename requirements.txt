@@ -29,8 +29,8 @@ streamlit==1.31.0
 plotly==5.18.0
 matplotlib==3.8.2
 
-# 技術指標
-pandas-ta==0.4.67b0
+# 技術指標 (ta-lib代替)
+ta==0.11.0
 
 # 設定ファイル
 PyYAML==6.0.1
