@@ -1,5 +1,9 @@
 # CryptoTrader 設定ファイル
 
+# システム設定
+system:
+  timezone: "Asia/Tokyo"  # 日本時間（JST）
+
 # 取引所設定
 exchange:
   name: bitflyer

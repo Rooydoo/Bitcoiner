@@ -10,8 +10,17 @@ import threading
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Optional
+from zoneinfo import ZoneInfo
 import pandas as pd
 import numpy as np
+
+# タイムゾーン設定（日本時間）
+JST = ZoneInfo("Asia/Tokyo")
+
+
+def now_jst() -> datetime:
+    """日本時間で現在時刻を取得"""
+    return datetime.now(JST)
 
 # プロジェクトルートをパスに追加
 sys.path.insert(0, str(Path(__file__).parent))
@@ -1887,7 +1896,7 @@ class CryptoTrader:
     def run_trading_cycle(self):
         """1サイクルの取引処理"""
         logger.info("\n" + "=" * 70)
-        logger.info(f"取引サイクル開始: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"取引サイクル開始: {now_jst().strftime('%Y-%m-%d %H:%M:%S')} JST")
         logger.info("=" * 70)
 
         # 自動再開チェック（24時間経過で自動的に取引再開）
@@ -2119,7 +2128,7 @@ class CryptoTrader:
         self.telegram_bot.start()
 
         self.is_running = True
-        last_health_check = datetime.now()
+        last_health_check = now_jst()
         cycle_count = 0
         consecutive_api_errors = 0
 
@@ -2169,8 +2178,8 @@ class CryptoTrader:
                         self.db_manager.close_all_connections()
                         logger.debug("  ✓ 古い接続をクローズし、次回アクセス時に新規接続を作成します")
 
-                    # 定時レポートチェック（1日3回）
-                    now = datetime.now()
+                    # 定時レポートチェック（1日3回）- 日本時間
+                    now = now_jst()
                     today = now.date()
                     current_time = now.strftime('%H:%M')
 
@@ -2205,7 +2214,7 @@ class CryptoTrader:
                             sent_reports['monthly'] = today
 
                     # 健全性チェック（1時間ごと）
-                    if (datetime.now() - last_health_check).total_seconds() > 3600:
+                    if (now_jst() - last_health_check).total_seconds() > 3600:
                         logger.info("\n[定期健全性チェック]")
                         is_healthy, issues, warnings = self.health_checker.run_all_checks()
 
@@ -2214,7 +2223,7 @@ class CryptoTrader:
                             logger.error(error_msg)
                             self.notifier.notify_error('健全性チェック失敗', error_msg)
 
-                        last_health_check = datetime.now()
+                        last_health_check = now_jst()
 
                     # パフォーマンスサマリー（10サイクルごと）
                     if cycle_count % 10 == 0 and self.performance_tracker:
