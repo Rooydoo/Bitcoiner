@@ -539,7 +539,7 @@ class CryptoTrader:
 
                 # テクニカル指標計算
                 logger.info(f"  → テクニカル指標計算中")
-                df = self.indicators.calculate_all_indicators(df)
+                df = self.indicators.calculate_all(df)
 
                 # 特徴量エンジニアリング
                 logger.info(f"  → 特徴量エンジニアリング実行中")
@@ -647,7 +647,7 @@ class CryptoTrader:
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
 
             # テクニカル指標計算
-            df = self.indicators.calculate_all_indicators(df)
+            df = self.indicators.calculate_all(df)
 
             # DB保存
             for _, row in df.iterrows():
