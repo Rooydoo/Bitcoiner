@@ -105,3 +105,41 @@ class ConfigLoader:
     def __contains__(self, key: str) -> bool:
         """'key in config' をサポート"""
         return self.get(key) is not None
+
+    def reload(self, validate: bool = True) -> bool:
+        """
+        MEDIUM-2: 設定ファイルを再読み込み（バリデーション付き）
+
+        Args:
+            validate: 再読み込み後にバリデーションを実行するか
+
+        Returns:
+            成功したらTrue、失敗したらFalse
+
+        Raises:
+            ValueError: バリデーションに失敗した場合
+        """
+        # 現在の設定をバックアップ
+        old_config = self.config.copy()
+
+        try:
+            # 設定を再読み込み
+            self._load_yaml_config()
+            self._override_with_env()
+
+            # バリデーション実行
+            if validate:
+                from utils.config_validator import ConfigValidator
+                validator = ConfigValidator(self.config)
+                if not validator.validate():
+                    # バリデーション失敗 - 元の設定に戻す
+                    self.config = old_config
+                    error_msg = "\n".join(validator.errors)
+                    raise ValueError(f"設定ファイルのバリデーションに失敗:\n{error_msg}")
+
+            return True
+
+        except Exception as e:
+            # エラー発生時は元の設定に戻す
+            self.config = old_config
+            raise

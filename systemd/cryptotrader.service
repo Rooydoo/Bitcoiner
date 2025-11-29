@@ -1,28 +1,25 @@
 [Unit]
-Description=CryptoTrader - 暗号資産自動売買システム
+Description=CryptoTrader Bitcoin Trading Bot
 After=network.target
 
 [Service]
 Type=simple
-User=your_username
-WorkingDirectory=/path/to/Bitcoiner
-ExecStart=/path/to/Bitcoiner/venv/bin/python /path/to/Bitcoiner/main_trader.py --interval 5
-Restart=on-failure
-RestartSec=30
-StandardOutput=append:/path/to/Bitcoiner/logs/systemd.log
-StandardError=append:/path/to/Bitcoiner/logs/systemd_error.log
-
-# 環境変数
-Environment="PATH=/path/to/Bitcoiner/venv/bin"
-EnvironmentFile=/path/to/Bitcoiner/.env
+User=YOUR_USERNAME
+WorkingDirectory=/home/YOUR_USERNAME/Bitcoiner
+Environment="PATH=/home/YOUR_USERNAME/Bitcoiner/venv/bin:/usr/bin"
+ExecStart=/home/YOUR_USERNAME/Bitcoiner/venv/bin/python main_trader.py --interval 5
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/YOUR_USERNAME/Bitcoiner/logs/cryptotrader.log
+StandardError=append:/home/YOUR_USERNAME/Bitcoiner/logs/cryptotrader_error.log
 
 # リソース制限
-MemoryLimit=1G
-CPUQuota=50%
+LimitNOFILE=65536
+TimeoutStopSec=30
 
-# セキュリティ設定
-PrivateTmp=true
-NoNewPrivileges=true
+# クラッシュ時の自動再起動設定
+StartLimitInterval=200
+StartLimitBurst=5
 
 [Install]
 WantedBy=multi-user.target

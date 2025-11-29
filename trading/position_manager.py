@@ -4,9 +4,11 @@
 """
 
 import logging
+import threading
 from typing import Dict, Optional, List
 from datetime import datetime
 from data.storage.sqlite_manager import SQLiteManager
+from utils.constants import BITFLYER_COMMISSION_RATE, SIDE_LONG, SIDE_SHORT
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +23,7 @@ class Position:
         entry_price: float,
         quantity: float,
         entry_time: Optional[datetime] = None,
-        position_id: Optional[str] = None,
-        leverage: float = 1.0,
-        margin: float = 0.0
+        position_id: Optional[str] = None
     ):
         """
         Args:
@@ -33,8 +33,6 @@ class Position:
             quantity: 数量
             entry_time: エントリー時刻
             position_id: ポジションID
-            leverage: レバレッジ倍率（デフォルト: 1.0 = 現物）
-            margin: 使用証拠金（レバレッジ取引時）
         """
         import uuid
         self.position_id = position_id or str(uuid.uuid4())
@@ -48,12 +46,7 @@ class Position:
         self.realized_pnl = 0.0
         self.status = 'open'  # 'open', 'closed'
 
-        # レバレッジ関連
-        self.leverage = max(1.0, leverage)  # 最低1倍
-        self.margin = margin if margin > 0 else (entry_price * quantity) / self.leverage
-        self.is_leveraged = self.leverage > 1.0 or symbol.startswith('FX_')
-
-    def calculate_unrealized_pnl(self, current_price: float, commission_rate: float = 0.0015) -> float:
+    def calculate_unrealized_pnl(self, current_price: float, commission_rate: float = BITFLYER_COMMISSION_RATE) -> float:
         """
         未実現損益を計算（手数料考慮）
 
@@ -63,22 +56,19 @@ class Position:
 
         Returns:
             未実現損益（手数料控除後）
-
-        Note:
-            エントリー時の手数料は注文執行時にbitFlyerで既に差し引かれているため、
-            ここでは決済時の手数料（見込み）のみを考慮する。
-            エントリー手数料を再度差し引くと二重計算になる。
         """
-        if self.side == 'long':
+        if self.side == SIDE_LONG:
             pnl = (current_price - self.entry_price) * self.quantity
         else:  # short
             pnl = (self.entry_price - current_price) * self.quantity
 
-        # 決済時手数料のみ考慮（エントリー時手数料は既に支払い済みのため除外）
+        # エントリー時手数料（既に支払い済み）
+        entry_fee = self.entry_price * self.quantity * commission_rate
+        # 決済時手数料（未払い、見込み）
         exit_fee = current_price * self.quantity * commission_rate
 
         # 手数料を差し引いた実質PnL
-        pnl_after_fees = pnl - exit_fee
+        pnl_after_fees = pnl - entry_fee - exit_fee
 
         return pnl_after_fees
 
@@ -95,7 +85,9 @@ class Position:
         pnl = self.calculate_unrealized_pnl(current_price)
         invested_capital = self.entry_price * self.quantity
 
-        return (pnl / invested_capital) * 100 if invested_capital > 0 else 0.0
+        # HIGH-2: ゼロ除算防止のためepsilon使用
+        epsilon = 1e-10
+        return (pnl / invested_capital) * 100 if invested_capital > epsilon else 0.0
 
     def close(self, exit_price: float, exit_time: Optional[datetime] = None):
         """
@@ -113,56 +105,6 @@ class Position:
         logger.info(f"ポジションクローズ: {self.symbol} {self.side.upper()} "
                    f"損益=¥{self.realized_pnl:,.0f} ({self.calculate_unrealized_pnl_pct(exit_price):.2f}%)")
 
-    def calculate_margin_ratio(self, current_price: float) -> float:
-        """
-        証拠金維持率を計算（レバレッジ取引用）
-
-        Args:
-            current_price: 現在価格
-
-        Returns:
-            証拠金維持率（1.0 = 100%）
-        """
-        if not self.is_leveraged or self.margin <= 0:
-            return 1.0  # 現物は常に100%
-
-        # entry_priceが無効な場合のガード
-        if self.entry_price <= 0:
-            return 1.0
-
-        # 未実現損益（率）
-        if self.side == 'long':
-            pnl_ratio = (current_price - self.entry_price) / self.entry_price
-        else:
-            pnl_ratio = (self.entry_price - current_price) / self.entry_price
-
-        # 証拠金維持率 = (証拠金 + 評価損益) / 証拠金
-        adjusted_margin = self.margin * (1 + pnl_ratio * self.leverage)
-        margin_ratio = adjusted_margin / self.margin
-
-        return max(0.0, margin_ratio)
-
-    def get_liquidation_price(self, liquidation_threshold: float = 0.5) -> float:
-        """
-        ロスカット価格を計算
-
-        Args:
-            liquidation_threshold: ロスカットしきい値（デフォルト: 50%）
-
-        Returns:
-            ロスカット価格
-        """
-        if not self.is_leveraged:
-            return 0.0  # 現物はロスカットなし
-
-        # 証拠金維持率がしきい値になる価格を計算
-        loss_ratio = (1 - liquidation_threshold) / self.leverage
-
-        if self.side == 'long':
-            return self.entry_price * (1 - loss_ratio)
-        else:
-            return self.entry_price * (1 + loss_ratio)
-
     def to_dict(self) -> Dict:
         """辞書形式に変換"""
         return {
@@ -174,10 +116,7 @@ class Position:
             'exit_price': self.exit_price,
             'exit_time': self.exit_time.isoformat() if self.exit_time else None,
             'realized_pnl': self.realized_pnl,
-            'status': self.status,
-            'leverage': self.leverage,
-            'margin': self.margin,
-            'is_leveraged': self.is_leveraged
+            'status': self.status
         }
 
 
@@ -193,6 +132,9 @@ class PositionManager:
         self.open_positions: Dict[str, Position] = {}  # symbol -> Position
         self.closed_positions: List[Position] = []
 
+        # ✨ 並行処理ロック（ポジション作成の競合状態を防止）
+        self.position_lock = threading.Lock()
+
         logger.info("ポジション管理システム初期化")
 
     def open_position(
@@ -200,9 +142,7 @@ class PositionManager:
         symbol: str,
         side: str,
         entry_price: float,
-        quantity: float,
-        leverage: float = 1.0,
-        margin: float = 0.0
+        quantity: float
     ) -> Position:
         """
         新規ポジションを開く
@@ -212,50 +152,42 @@ class PositionManager:
             side: 'long' または 'short'
             entry_price: エントリー価格
             quantity: 数量
-            leverage: レバレッジ倍率（デフォルト: 1.0 = 現物）
-            margin: 使用証拠金
 
         Returns:
             Positionインスタンス
         """
-        # 既存のポジションがある場合はエラー
-        if symbol in self.open_positions:
-            logger.error(f"{symbol}の既存ポジションがあります。先に既存ポジションを決済してください。")
-            return None
+        # ✨ ロック取得（競合状態を防止）
+        with self.position_lock:
+            # 既存のポジションがある場合はエラー
+            if symbol in self.open_positions:
+                logger.error(f"{symbol}の既存ポジションがあります。先に既存ポジションを決済してください。")
+                return None
 
-        # ショートポジション検証: bitFlyer現物市場では空売り不可
-        # FX_BTC_JPY以外でショートを試みた場合はエラー
-        if side == 'short' and not symbol.startswith('FX_'):
-            logger.error(f"現物市場 {symbol} ではショートポジションは取引できません。"
-                        f"ショートポジションはFX_BTC_JPYのみ対応しています。")
-            return None
+            # ショートポジション検証: bitFlyer現物市場では空売り不可
+            # FX_BTC_JPY以外でショートを試みた場合はエラー
+            if side == SIDE_SHORT and not symbol.startswith('FX_'):
+                logger.error(f"現物市場 {symbol} ではショートポジションは取引できません。"
+                            f"ショートポジションはFX_BTC_JPYのみ対応しています。")
+                return None
 
-        # レバレッジ検証: 現物市場ではレバレッジ不可
-        if leverage > 1.0 and not symbol.startswith('FX_'):
-            logger.warning(f"現物市場 {symbol} ではレバレッジは使用できません。1倍に設定します。")
-            leverage = 1.0
+            position = Position(symbol, side, entry_price, quantity)
+            self.open_positions[symbol] = position
 
-        position = Position(symbol, side, entry_price, quantity, leverage=leverage, margin=margin)
-        self.open_positions[symbol] = position
+            # DBに保存
+            if self.db_manager:
+                position_data = {
+                    'position_id': position.position_id,
+                    'symbol': symbol,
+                    'side': side,
+                    'entry_price': entry_price,
+                    'entry_amount': quantity,
+                    'entry_time': int(position.entry_time.timestamp()),  # Unix timestamp
+                    'status': 'open'
+                }
+                self.db_manager.create_position(position_data)
 
-        # DBに保存
-        if self.db_manager:
-            position_data = {
-                'position_id': position.position_id,
-                'symbol': symbol,
-                'side': side,
-                'entry_price': entry_price,
-                'entry_amount': quantity,
-                'entry_time': position.entry_time.isoformat(),
-                'status': 'open',
-                'leverage': leverage,
-                'margin': position.margin
-            }
-            self.db_manager.create_position(position_data)
-
-        leverage_info = f" (レバレッジ: {leverage}倍)" if leverage > 1.0 else ""
-        logger.info(f"ポジションオープン: {symbol} {side.upper()} "
-                   f"{quantity:.6f} @ ¥{entry_price:,.0f}{leverage_info}")
+            logger.info(f"ポジションオープン: {symbol} {side.upper()} "
+                       f"{quantity:.6f} @ ¥{entry_price:,.0f}")
 
         return position
 
@@ -284,7 +216,7 @@ class PositionManager:
             return None
 
         # ショートポジション検証
-        if side == 'short' and not symbol.startswith('FX_'):
+        if side == SIDE_SHORT and not symbol.startswith('FX_'):
             logger.error(f"現物市場 {symbol} ではショートポジション不可")
             return None
 
@@ -299,7 +231,7 @@ class PositionManager:
                 'side': side,
                 'entry_price': entry_price,
                 'entry_amount': quantity,
-                'entry_time': position.entry_time.isoformat(),
+                'entry_time': int(position.entry_time.timestamp()),  # Unix timestamp
                 'status': 'pending_execution'
             }
             self.db_manager.create_position(position_data)
@@ -417,49 +349,105 @@ class PositionManager:
         remaining_quantity = position.quantity * (1.0 - close_ratio)
 
         # 部分決済のPNL計算（手数料考慮）
-        commission_rate = 0.0015  # bitFlyer手数料 0.15%
+        commission_rate = BITFLYER_COMMISSION_RATE
 
-        if position.side == 'long':
+        if position.side == SIDE_LONG:
             partial_pnl = (exit_price - position.entry_price) * partial_quantity
         else:  # short
             partial_pnl = (position.entry_price - exit_price) * partial_quantity
 
-        # 決済時手数料のみ考慮（エントリー時手数料は既に支払い済み）
+        # 手数料控除
+        # エントリー時手数料（部分比率分）
+        entry_fee = position.entry_price * partial_quantity * commission_rate
+        # 決済時手数料
         exit_fee = exit_price * partial_quantity * commission_rate
 
         # 手数料控除後の実質PnL
-        partial_pnl_after_fees = partial_pnl - exit_fee
+        partial_pnl_after_fees = partial_pnl - entry_fee - exit_fee
 
-        partial_pnl_pct = (partial_pnl_after_fees / (position.entry_price * partial_quantity)) * 100 if partial_quantity > 0 else 0.0
+        # HIGH-1: Float比較にepsilon使用（ゼロ除算回避）
+        epsilon = 1e-10
+        cost_basis = position.entry_price * partial_quantity
+        partial_pnl_pct = (partial_pnl_after_fees / cost_basis) * 100 if cost_basis > epsilon else 0.0
 
         logger.info(f"ポジション部分決済: {symbol} {position.side.upper()} "
                    f"{close_ratio:.0%} ({partial_quantity:.6f} / {position.quantity:.6f}) "
                    f"損益=¥{partial_pnl_after_fees:,.0f} ({partial_pnl_pct:+.2f}%)")
 
-        # DBにトレード履歴を記録
+        # ✨ アトミックなDB操作: トレード記録とポジション更新を1トランザクションで実行
         if self.db_manager:
             from datetime import datetime
+            import sqlite3
+
             trade_data = {
                 'symbol': symbol,
                 'side': position.side,
                 'price': exit_price,
                 'amount': partial_quantity,
                 'cost': exit_price * partial_quantity,
-                'fee': exit_fee,  # 決済時手数料のみ
+                'fee': entry_fee + exit_fee,
                 'order_type': 'market',
-                'pnl': partial_pnl_after_fees,  # 手数料控除後
-                'timestamp': datetime.now().isoformat()
+                'profit_loss': partial_pnl_after_fees,
+                'timestamp': int(datetime.now().timestamp())
             }
-            self.db_manager.insert_trade(trade_data)
 
-            # ポジションの数量を更新
-            updates = {
-                'entry_amount': remaining_quantity
-            }
-            self.db_manager.update_position(position.position_id, updates)
+            # トランザクション開始
+            # CRITICAL-2: 公開メソッド経由で接続取得
+            conn = self.db_manager.get_connection(self.db_manager.trades_db)
+            try:
+                conn.execute("BEGIN IMMEDIATE")
 
-        # ポジションの数量を更新
+                # 1. トレード履歴を記録
+                cursor = conn.cursor()
+                # ✨ HIGH-3: 手数料通貨を推定（symbolから判定）
+                # 例: BTC/JPY → JPY、ETH/BTC → BTC
+                if '/' in trade_data['symbol']:
+                    quote_currency = trade_data['symbol'].split('/')[1]
+                    fee_currency = quote_currency
+                else:
+                    fee_currency = 'JPY'  # フォールバック
+
+                cursor.execute("""
+                    INSERT INTO trades (
+                        position_id, symbol, side, price, amount, cost,
+                        fee, fee_currency, order_type, profit_loss, timestamp
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    position.position_id,
+                    trade_data['symbol'],
+                    trade_data['side'],
+                    trade_data['price'],
+                    trade_data['amount'],
+                    trade_data['cost'],
+                    trade_data['fee'],
+                    fee_currency,
+                    trade_data['order_type'],
+                    trade_data['profit_loss'],
+                    trade_data['timestamp']
+                ))
+
+                # 2. ポジションの数量を更新
+                cursor.execute("""
+                    UPDATE positions
+                    SET entry_amount = ?
+                    WHERE position_id = ?
+                """, (remaining_quantity, position.position_id))
+
+                # コミット
+                conn.commit()
+                logger.debug(f"  ✓ 部分決済のDB記録完了（アトミック）")
+
+            except Exception as db_error:
+                conn.rollback()
+                # LOW-2: スタックトレース付きでログ
+                logger.error(f"  ✗ CRITICAL-2: 部分決済のDB記録失敗: {db_error}", exc_info=True)
+                # CRITICAL-2: DB失敗時はメモリも更新しない
+                raise  # 例外を伝播してメモリ更新を防ぐ
+                # HIGH-8: db_managerの接続キャッシュを使用 (conn.close()不要)
+
+        # CRITICAL-2: DB操作が成功した場合のみポジションの数量を更新
         position.quantity = remaining_quantity
+        logger.debug(f"CRITICAL-2: メモリ上のポジション数量を更新: {remaining_quantity}")
 
         partial_close_info = {
             'symbol': symbol,
@@ -470,7 +458,8 @@ class PositionManager:
             'partial_pnl': partial_pnl_after_fees,  # 手数料控除後
             'partial_pnl_pct': partial_pnl_pct,
             'exit_price': exit_price,
-            'exit_fee': exit_fee  # 決済時手数料のみ
+            'entry_fee': entry_fee,
+            'exit_fee': exit_fee
         }
 
         return partial_close_info
@@ -490,41 +479,61 @@ class PositionManager:
         Returns:
             クローズしたPositionインスタンス（存在しない場合はNone）
         """
-        if symbol not in self.open_positions:
-            logger.warning(f"{symbol}のオープンポジションが見つかりません")
-            return None
+        # CRITICAL-1: 原子性保証のため、DB保存→メモリ削除の順序で実行
+        with self.position_lock:
+            if symbol not in self.open_positions:
+                logger.warning(f"{symbol}のオープンポジションが見つかりません")
+                return None
 
-        position = self.open_positions.pop(symbol)
-        position.close(exit_price)
-        self.closed_positions.append(position)
+            # ポジションのコピーを取得（まだメモリから削除しない）
+            position = self.open_positions[symbol]
+            position.close(exit_price)
 
-        # DBに保存
-        if self.db_manager:
-            # ポジション更新
-            updates = {
-                'exit_price': exit_price,
-                'exit_amount': position.quantity,
-                'exit_time': position.exit_time.isoformat(),
-                'status': 'closed'
-            }
-            self.db_manager.update_position(position.position_id, updates)
+            # CRITICAL-1: DBに先に保存（失敗したらメモリから削除しない）
+            if self.db_manager:
+                try:
+                    # ポジション更新
+                    updates = {
+                        'exit_price': exit_price,
+                        'exit_amount': position.quantity,
+                        'exit_time': int(position.exit_time.timestamp()),
+                        'status': 'closed'
+                    }
+                    self.db_manager.update_position(position.position_id, updates)
 
-            # トレード履歴にも記録
-            from datetime import datetime
-            commission_rate = 0.0015
-            exit_fee = exit_price * position.quantity * commission_rate
-            trade_data = {
-                'symbol': symbol,
-                'side': position.side,
-                'price': exit_price,
-                'amount': position.quantity,
-                'cost': exit_price * position.quantity,
-                'fee': exit_fee,  # 決済時手数料のみ（エントリー時は既に支払い済み）
-                'order_type': 'market',
-                'pnl': position.realized_pnl,  # 既に手数料控除済み
-                'timestamp': datetime.now().isoformat()
-            }
-            self.db_manager.insert_trade(trade_data)
+                    # トレード履歴にも記録
+                    from datetime import datetime
+                    commission_rate = BITFLYER_COMMISSION_RATE
+                    entry_fee = position.entry_price * position.quantity * commission_rate
+                    exit_fee = exit_price * position.quantity * commission_rate
+                    trade_data = {
+                        'symbol': symbol,
+                        'side': position.side,
+                        'price': exit_price,
+                        'amount': position.quantity,
+                        'cost': exit_price * position.quantity,
+                        'fee': entry_fee + exit_fee,
+                        'order_type': 'market',
+                        'profit_loss': position.realized_pnl,
+                        'timestamp': int(datetime.now().timestamp())
+                    }
+                    self.db_manager.insert_trade(trade_data)
+
+                    logger.debug(f"CRITICAL-1: DB保存成功、メモリから削除します: {symbol}")
+
+                except Exception as db_error:
+                    # DB保存失敗 → メモリから削除しない
+                    # LOW-2: スタックトレース付きでログ
+                    logger.error(f"CRITICAL-1: DB保存失敗、ポジションをメモリに保持: {symbol} - {db_error}", exc_info=True)
+                    # ポジションを元の状態に戻す
+                    position.exit_price = None
+                    position.exit_time = None
+                    position.realized_pnl = 0
+                    raise  # 呼び出し元にエラーを伝播
+
+            # DB保存成功 → メモリから削除してclosed_positionsに追加
+            self.open_positions.pop(symbol)
+            self.closed_positions.append(position)
 
         return position
 
@@ -538,7 +547,9 @@ class PositionManager:
         Returns:
             Positionインスタンス（存在しない場合はNone）
         """
-        return self.open_positions.get(symbol)
+        # MEDIUM-1: スレッドセーフなアクセス
+        with self.position_lock:
+            return self.open_positions.get(symbol)
 
     def get_open_position(self, symbol: str) -> Optional[Position]:
         """
@@ -583,23 +594,25 @@ class PositionManager:
         Returns:
             損益情報の辞書
         """
-        unrealized_pnl = 0.0
-        realized_pnl = sum(pos.realized_pnl for pos in self.closed_positions)
+        # MEDIUM-1: ポジション辞書へのアクセスを保護（レースコンディション防止）
+        with self.position_lock:
+            unrealized_pnl = 0.0
+            realized_pnl = sum(pos.realized_pnl for pos in self.closed_positions)
 
-        # 未実現損益
-        for symbol, position in self.open_positions.items():
-            if symbol in current_prices:
-                unrealized_pnl += position.calculate_unrealized_pnl(current_prices[symbol])
+            # 未実現損益
+            for symbol, position in self.open_positions.items():
+                if symbol in current_prices:
+                    unrealized_pnl += position.calculate_unrealized_pnl(current_prices[symbol])
 
-        total_pnl = realized_pnl + unrealized_pnl
+            total_pnl = realized_pnl + unrealized_pnl
 
-        return {
-            'realized_pnl': realized_pnl,
-            'unrealized_pnl': unrealized_pnl,
-            'total_pnl': total_pnl,
-            'open_positions': len(self.open_positions),
-            'closed_positions': len(self.closed_positions)
-        }
+            return {
+                'realized_pnl': realized_pnl,
+                'unrealized_pnl': unrealized_pnl,
+                'total_pnl': total_pnl,
+                'open_positions': len(self.open_positions),
+                'closed_positions': len(self.closed_positions)
+            }
 
     def get_position_summary(self, symbol: str, current_price: float) -> Optional[Dict]:
         """
@@ -622,7 +635,7 @@ class PositionManager:
         holding_time = datetime.now() - position.entry_time
         holding_hours = holding_time.total_seconds() / 3600
 
-        result = {
+        return {
             'symbol': symbol,
             'side': position.side,
             'entry_price': position.entry_price,
@@ -631,18 +644,8 @@ class PositionManager:
             'unrealized_pnl': unrealized_pnl,
             'unrealized_pnl_pct': unrealized_pnl_pct,
             'holding_hours': holding_hours,
-            'entry_time': position.entry_time.isoformat(),
-            'leverage': position.leverage,
-            'is_leveraged': position.is_leveraged
+            'entry_time': position.entry_time.isoformat()
         }
-
-        # レバレッジ取引の場合は証拠金情報を追加
-        if position.is_leveraged:
-            result['margin'] = position.margin
-            result['margin_ratio'] = position.calculate_margin_ratio(current_price)
-            result['liquidation_price'] = position.get_liquidation_price()
-
-        return result
 
     def close_all_positions(self, current_prices: Dict[str, float]) -> List[Position]:
         """

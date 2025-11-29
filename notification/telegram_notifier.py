@@ -7,6 +7,7 @@ import logging
 from typing import Optional, Dict, List
 from datetime import datetime
 import requests
+from utils.constants import SIDE_LONG
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +86,7 @@ class TelegramNotifier:
             price: 価格
             quantity: 数量
         """
-        side_jp = "🟢 買い" if side == "long" else "🔴 売り"
+        side_jp = "🟢 買い" if side == SIDE_LONG else "🔴 売り"
 
         message = f"""
 📈 <b>取引実行</b>
@@ -129,7 +130,7 @@ class TelegramNotifier:
             emoji = "⚠️"
             result = "損切り"
 
-        side_jp = "買い" if side == "long" else "売り"
+        side_jp = "買い" if side == SIDE_LONG else "売り"
 
         message = f"""
 {emoji} <b>{result}</b>

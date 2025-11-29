@@ -6,6 +6,7 @@
 import logging
 from typing import Dict, Optional, Tuple
 from trading.position_manager import Position
+from utils.constants import SIDE_SHORT
 
 logger = logging.getLogger(__name__)
 
@@ -126,28 +127,29 @@ class RiskManager:
 
         pnl_pct = position.calculate_unrealized_pnl_pct(current_price)
 
-        # 第1段階: +15%で50%決済
-        if pnl_pct >= 15.0 and position.symbol not in self.partial_profit_taken:
-            logger.info(f"第1段階利益確定: {position.symbol} +{pnl_pct:.2f}% - 50%決済")
-            self.partial_profit_taken[position.symbol] = True
+        # 段階的利益確定をprofit_levelsから実行
+        for level_idx, level_config in enumerate(self.profit_levels, start=1):
+            threshold_pct = level_config['threshold_pct']
+            close_ratio = level_config['close_ratio']
 
-            return {
-                'action': 'partial_close',
-                'close_ratio': 0.5,
-                'reason': f'第1段階利益確定（+{pnl_pct:.2f}%）',
-                'level': 1
-            }
+            # 第1段階の場合のみpartial_profit_takenをチェック
+            if level_idx == 1 and position.symbol in self.partial_profit_taken:
+                continue
 
-        # 第2段階: +25%で残り全て決済
-        if pnl_pct >= 25.0:
-            logger.info(f"第2段階利益確定: {position.symbol} +{pnl_pct:.2f}% - 全決済")
+            if pnl_pct >= threshold_pct:
+                action = 'full_close' if close_ratio >= 1.0 else 'partial_close'
+                close_pct = close_ratio * 100
+                logger.info(f"第{level_idx}段階利益確定: {position.symbol} +{pnl_pct:.2f}% - {close_pct:.0f}%決済")
 
-            return {
-                'action': 'full_close',
-                'close_ratio': 1.0,
-                'reason': f'第2段階利益確定（+{pnl_pct:.2f}%）',
-                'level': 2
-            }
+                if level_idx == 1:
+                    self.partial_profit_taken[position.symbol] = True
+
+                return {
+                    'action': action,
+                    'close_ratio': close_ratio,
+                    'reason': f'第{level_idx}段階利益確定（+{pnl_pct:.2f}%）',
+                    'level': level_idx
+                }
 
         return None
 
@@ -229,7 +231,7 @@ class RiskManager:
         risk_amount = available_capital * (risk_per_trade_pct / 100)
 
         # ストップロス幅（ロング/ショートに応じて計算）
-        if side == 'short':
+        if side == SIDE_SHORT:
             # ショート: 価格が上がると損失
             stop_loss_price = current_price * (1 + self.stop_loss_pct / 100)
             risk_per_unit = stop_loss_price - current_price

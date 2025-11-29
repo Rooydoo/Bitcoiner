@@ -226,18 +226,37 @@ class ConfigValidator:
                     f"strategy_allocation.cointegration_ratio は0.0-1.0の範囲で設定してください: {coint_ratio}"
                 )
 
-        # 戦略比率の合計チェック
+        # ✨ 戦略比率の合計チェック（CRITICAL: 過剰レバレッジ防止）
         if trend_ratio is not None and coint_ratio is not None:
             total_strategy = trend_ratio + coint_ratio
-            if total_strategy > 1.0:
-                self.warnings.append(
-                    f"strategy_allocation の trend_ratio + cointegration_ratio が1.0を超えています: "
-                    f"{trend_ratio} + {coint_ratio} = {total_strategy:.2f}"
+
+            # 1.1倍（110%）以上は危険なためエラー
+            if total_strategy > 1.1:
+                self.errors.append(
+                    f"❌ CRITICAL: strategy_allocation の合計が110%を超えています（過剰レバレッジ）: "
+                    f"trend_ratio({trend_ratio}) + cointegration_ratio({coint_ratio}) = {total_strategy:.2f} "
+                    f"→ 推奨範囲: 0.95-1.05"
                 )
+            # 1.05～1.1倍は警告
+            elif total_strategy > 1.05:
+                self.warnings.append(
+                    f"⚠️  strategy_allocation の合計が105%を超えています: "
+                    f"{trend_ratio} + {coint_ratio} = {total_strategy:.2f} "
+                    f"→ 推奨範囲: 0.95-1.05"
+                )
+            # 0.5未満は資金遊休の警告
             elif total_strategy < 0.5:
                 self.warnings.append(
-                    f"strategy_allocation の戦略配分が低すぎます: "
-                    f"trend={trend_ratio:.0%} + coint={coint_ratio:.0%} = {total_strategy:.0%}"
+                    f"strategy_allocation の戦略配分が低すぎます（資金遊休）: "
+                    f"trend={trend_ratio:.0%} + coint={coint_ratio:.0%} = {total_strategy:.0%} "
+                    f"→ 推奨範囲: 0.95-1.05"
+                )
+            # 0.95未満も警告
+            elif total_strategy < 0.95:
+                self.warnings.append(
+                    f"strategy_allocation の合計が95%未満です: "
+                    f"{trend_ratio} + {coint_ratio} = {total_strategy:.2f} "
+                    f"→ 推奨範囲: 0.95-1.05"
                 )
 
     def print_validation_result(self, is_valid: bool, errors: List[str], warnings: List[str]):

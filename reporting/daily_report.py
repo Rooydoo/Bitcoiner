@@ -75,6 +75,46 @@ class ReportGenerator:
 平均損失: ¥{daily_data['avg_loss']:,.0f}
 プロフィット率: {daily_data['profit_factor']:.2f}
 
+【取引対象通貨ペア】
+"""
+
+        # 通貨ペア情報を追加
+        if daily_data['trading_pairs']:
+            for pair in daily_data['trading_pairs']:
+                symbol = pair['symbol']
+                allocation = pair.get('allocation', 0)
+                summary = daily_data['pair_summary'].get(symbol, {})
+
+                report += f"""
+• {symbol} (配分: {allocation:.0%})
+  保有中: {summary.get('open_count', 0)}ポジション / 未実現損益: ¥{summary.get('open_unrealized_pnl', 0):,.0f}
+  本日決済: {summary.get('trades_count', 0)}回 / 損益: ¥{summary.get('trades_pnl', 0):,.0f}
+"""
+        else:
+            report += "\n設定なし\n"
+
+        report += f"""
+【ペアトレーディング】
+"""
+
+        # ペアトレーディングポジション情報を追加
+        if daily_data['pair_trading_positions']:
+            for pp in daily_data['pair_trading_positions']:
+                entry_time = pd.to_datetime(pp.get('entry_time', 0), unit='s')
+                holding_hours = (datetime.now() - entry_time).total_seconds() / 3600
+                direction_text = "ロングスプレッド" if pp.get('direction') == 'long_spread' else "ショートスプレッド"
+
+                report += f"""
+• {pp.get('symbol1')} / {pp.get('symbol2')}
+  方向: {direction_text}
+  エントリーZ-score: {pp.get('entry_z_score'):.2f}
+  未実現損益: ¥{pp.get('unrealized_pnl', 0):,.0f}
+  保有時間: {holding_hours:.1f}時間
+"""
+        else:
+            report += "\nなし\n"
+
+        report += f"""
 【保有ポジション】
 """
 
@@ -341,7 +381,8 @@ class ReportGenerator:
         win_rate = winning_trades / total_trades if total_trades > 0 else 0
 
         # 全ポジション（決済済み）を取得
-        conn = sqlite3.connect(self.db_manager.trades_db)
+        # BLOCKER-3: 安全な接続メソッドを使用
+        conn = self.db_manager.get_connection(self.db_manager.trades_db)
 
         query = "SELECT * FROM positions WHERE status = 'closed'"
         positions_df = pd.read_sql_query(query, conn)
@@ -382,9 +423,10 @@ class ReportGenerator:
 
         date_str = date.strftime('%Y-%m-%d')
         initial_capital = 200000  # デフォルト値
+        trading_pairs = []
 
         try:
-            # 設定ファイルから初期資本を取得
+            # 設定ファイルから初期資本と取引ペアを取得
             from pathlib import Path
             import yaml
             config_path = Path("config/config.yaml")
@@ -392,6 +434,7 @@ class ReportGenerator:
                 with open(config_path, 'r', encoding='utf-8') as f:
                     config = yaml.safe_load(f)
                     initial_capital = config.get('trading', {}).get('initial_capital', 200000)
+                    trading_pairs = config.get('trading_pairs', [])
         except Exception:
             pass
 
@@ -444,7 +487,8 @@ class ReportGenerator:
             })
 
         # 当日の決済済み取引を取得
-        conn = sqlite3.connect(self.db_manager.trades_db)
+        # BLOCKER-3: 安全な接続メソッドを使用
+        conn = self.db_manager.get_connection(self.db_manager.trades_db)
 
         # 日付の開始・終了タイムスタンプ
         start_ts = int(date.replace(hour=0, minute=0, second=0).timestamp())
@@ -479,6 +523,48 @@ class ReportGenerator:
         avg_loss = abs(total_loss) / losing_trades if losing_trades > 0 else 0
         profit_factor = abs(total_profit / total_loss) if total_loss != 0 else 0
 
+        # 通貨ペア別のサマリーを作成
+        pair_summary = {}
+        for pair_config in trading_pairs:
+            symbol = pair_config['symbol']
+
+            # このペアの保有ポジション
+            pair_open = [p for p in open_positions if p['symbol'] == symbol]
+
+            # このペアの本日決済済み取引
+            pair_trades = [t for t in today_trades if t['symbol'] == symbol]
+
+            # 統計計算
+            open_count = len(pair_open)
+            open_unrealized_pnl = sum(p['unrealized_pnl'] for p in pair_open)
+            trades_count_pair = len(pair_trades)
+            trades_pnl = sum(t['pnl'] for t in pair_trades)
+
+            pair_summary[symbol] = {
+                'allocation': pair_config.get('allocation', 0),
+                'open_count': open_count,
+                'open_unrealized_pnl': open_unrealized_pnl,
+                'trades_count': trades_count_pair,
+                'trades_pnl': trades_pnl
+            }
+
+        # ペアトレーディングポジションを取得
+        pair_trading_positions = []
+        try:
+            open_pair_positions = self.db_manager.get_open_pair_positions()
+            for pp in open_pair_positions:
+                pair_trading_positions.append({
+                    'pair_id': pp.get('pair_id', ''),
+                    'symbol1': pp.get('symbol1', ''),
+                    'symbol2': pp.get('symbol2', ''),
+                    'direction': pp.get('direction', ''),
+                    'entry_z_score': pp.get('entry_z_score', 0),
+                    'unrealized_pnl': pp.get('unrealized_pnl', 0),
+                    'entry_time': pp.get('entry_time', 0)
+                })
+        except Exception as e:
+            logger.warning(f"ペアトレーディングポジション取得エラー: {e}")
+
         return {
             'total_equity': total_equity,
             'daily_pnl': daily_pnl,
@@ -496,7 +582,10 @@ class ReportGenerator:
             'open_positions': open_positions,
             'today_trades': today_trades,
             'max_drawdown_pct': 0.0,  # 計算は複雑なので簡易実装
-            'sharpe_ratio': 0.0  # 計算は複雑なので簡易実装
+            'sharpe_ratio': 0.0,  # 計算は複雑なので簡易実装
+            'trading_pairs': trading_pairs,
+            'pair_summary': pair_summary,
+            'pair_trading_positions': pair_trading_positions
         }
 
     def _get_weekly_data(self, start_date: datetime, end_date: datetime) -> Dict:
@@ -544,7 +633,8 @@ class ReportGenerator:
         total_equity = initial_capital + total_pnl
 
         # 期間内のポジションを取得して平均保有時間を計算
-        conn = sqlite3.connect(self.db_manager.trades_db)
+        # BLOCKER-3: 安全な接続メソッドを使用
+        conn = self.db_manager.get_connection(self.db_manager.trades_db)
 
         start_ts = int(start_date.timestamp())
         end_ts = int(end_date.timestamp())
@@ -655,7 +745,8 @@ class ReportGenerator:
         total_equity = initial_capital + total_pnl
 
         # 期間内のポジションを取得
-        conn = sqlite3.connect(self.db_manager.trades_db)
+        # BLOCKER-3: 安全な接続メソッドを使用
+        conn = self.db_manager.get_connection(self.db_manager.trades_db)
 
         start_ts = int(start_date.timestamp())
         end_ts = int(end_date.timestamp())

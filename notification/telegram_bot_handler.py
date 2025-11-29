@@ -12,6 +12,7 @@ from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes
 import yaml
 from pathlib import Path
+from utils.constants import SIDE_LONG
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +212,7 @@ class TelegramBotHandler:
                     unrealized_pnl_pct = pos.calculate_unrealized_pnl_pct(current_price)
                     total_unrealized_pnl += unrealized_pnl
 
-                    side_emoji = "🟢" if pos.side == "long" else "🔴"
+                    side_emoji = "🟢" if pos.side == SIDE_LONG else "🔴"
                     pnl_emoji = "📈" if unrealized_pnl > 0 else "📉"
 
                     message += f"\n{side_emoji} <b>{pos.symbol}</b> {pos.side.upper()}\n"
@@ -373,7 +374,7 @@ class TelegramBotHandler:
                     current_price = self.trader.order_executor.get_current_price(pos.symbol)
 
                     # クローズ注文
-                    if pos.side == 'long':
+                    if pos.side == SIDE_LONG:
                         order = self.trader.order_executor.create_market_sell(
                             pos.symbol, pos.quantity
                         )
@@ -519,7 +520,7 @@ class TelegramBotHandler:
                 sell_qty = sell_value / current_price
 
                 try:
-                    if pos.side == 'long':
+                    if pos.side == SIDE_LONG:
                         order = self.trader.order_executor.create_market_sell(
                             pos.symbol, sell_qty
                         )
