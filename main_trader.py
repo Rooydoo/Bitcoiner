@@ -561,7 +561,7 @@ class CryptoTrader:
 
                 # 特徴量エンジニアリング
                 logger.info(f"  → 特徴量エンジニアリング実行中")
-                df = self.feature_engineer.engineer_features(df)
+                df = self.feature_engineer.create_all_features(df)
 
                 # NaN除去
                 df = df.dropna()
