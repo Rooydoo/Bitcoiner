@@ -315,8 +315,132 @@ python scripts/emergency_close.py --symbol BTC/JPY
 
 ---
 
+## 12. 本番サーバーデプロイ
+
+### 12.1 サーバー接続情報
+
+```
+ホスト: 72.60.208.158
+ユーザー: root
+接続コマンド: ssh root@72.60.208.158
+```
+
+### 12.2 初回セットアップ手順
+
+```bash
+# 1. サーバーに接続
+ssh root@72.60.208.158
+
+# 2. 作業ディレクトリ作成
+mkdir -p /opt/cryptotrader
+cd /opt/cryptotrader
+
+# 3. リポジトリをクローン
+git clone <repository-url> .
+
+# 4. Python仮想環境のセットアップ
+python3 -m venv venv
+source venv/bin/activate
+
+# 5. 依存パッケージのインストール
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# 6. 環境変数の設定
+cp config/.env.example config/.env
+nano config/.env  # APIキーを設定
+
+# 7. ディレクトリの作成
+mkdir -p logs database models
+```
+
+### 12.3 systemd サービス設定
+
+```bash
+# サービスファイルを作成
+cat > /etc/systemd/system/cryptotrader.service << 'EOF'
+[Unit]
+Description=CryptoTrader BTC/JPY Auto Trading
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/cryptotrader
+Environment=PATH=/opt/cryptotrader/venv/bin
+ExecStart=/opt/cryptotrader/venv/bin/python main_trader.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# サービスを有効化・起動
+systemctl daemon-reload
+systemctl enable cryptotrader
+systemctl start cryptotrader
+```
+
+### 12.4 デプロイ更新手順
+
+```bash
+# サーバーに接続
+ssh root@72.60.208.158
+
+# サービス停止
+systemctl stop cryptotrader
+
+# 最新コードを取得
+cd /opt/cryptotrader
+git pull origin main
+
+# 依存パッケージ更新（必要に応じて）
+source venv/bin/activate
+pip install -r requirements.txt
+
+# サービス再開
+systemctl start cryptotrader
+
+# ログ確認
+journalctl -u cryptotrader -f
+```
+
+### 12.5 リモート監視コマンド
+
+```bash
+# サービス状態確認
+ssh root@72.60.208.158 "systemctl status cryptotrader"
+
+# 最新ログ確認
+ssh root@72.60.208.158 "tail -50 /opt/cryptotrader/logs/trader.log"
+
+# ポジション確認
+ssh root@72.60.208.158 "cd /opt/cryptotrader && source venv/bin/activate && python scripts/check_position.py"
+
+# 緊急停止
+ssh root@72.60.208.158 "systemctl stop cryptotrader"
+```
+
+### 12.6 ファイアウォール設定（推奨）
+
+```bash
+# SSH以外のポートを制限
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow ssh
+ufw allow 8501/tcp  # Streamlit ダッシュボード（必要な場合）
+ufw enable
+```
+
+---
+
 ## 更新履歴
 
+- 2025-11-29: 本番サーバーデプロイセクション追加
+  - SSH接続情報（72.60.208.158）
+  - リモートデプロイ手順
+  - 監視コマンド
 - 2025-11-27: 初版作成
   - ウォークフォワード検証機能追加
   - Wait-for-Dip戦略対応
