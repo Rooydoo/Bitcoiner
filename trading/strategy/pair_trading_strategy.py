@@ -214,7 +214,9 @@ class PairTradingStrategy:
             (エグジットすべきか, 理由)
         """
         # 利益率計算
-        if position.entry_capital > 0:
+        # CRITICAL-10: entry_capitalのゼロチェック（epsilon使用）
+        epsilon = 1e-10
+        if position.entry_capital > epsilon:
             profit_pct = position.unrealized_pnl / position.entry_capital
         else:
             profit_pct = 0.0
@@ -224,7 +226,8 @@ class PairTradingStrategy:
             return True, 'take_profit'
 
         # トレーリングストップ（最高利益から一定%下落）
-        if position.max_pnl > 0 and position.entry_capital > 0:
+        # CRITICAL-10: 両方のゼロチェック（epsilon使用）
+        if position.max_pnl > epsilon and position.entry_capital > epsilon:
             max_profit_pct = position.max_pnl / position.entry_capital
             if max_profit_pct >= self.config.min_profit_pct:
                 # 最高利益から下落した場合
