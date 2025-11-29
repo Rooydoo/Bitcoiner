@@ -1,19 +1,19 @@
 # CryptoTrader 依存パッケージ
 
-# 基本ライブラリ
-numpy==1.24.3
-pandas==2.0.3
+# 基本ライブラリ (Python 3.12対応)
+numpy>=1.26.0,<2.0.0
+pandas>=2.1.0
 python-dateutil==2.8.2
 
 # 取引所API
 ccxt==4.1.40
 
-# 機械学習
-scikit-learn==1.3.2
-lightgbm==4.1.0
-hmmlearn==0.3.0
-statsmodels==0.14.1
-joblib==1.3.2
+# 機械学習 (Python 3.12対応)
+scikit-learn>=1.3.2
+lightgbm>=4.1.0
+hmmlearn>=0.3.0
+statsmodels>=0.14.1
+joblib>=1.3.2
 
 # データベース
 # sqlite3は標準ライブラリ
