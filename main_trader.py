@@ -18,8 +18,17 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 # Phase 1: Data Infrastructure
 from data.collector.bitflyer_api import BitflyerDataCollector
+from data.collector.binance_api import BinanceDataCollector
 from data.storage.sqlite_manager import SQLiteManager
 from data.processor.indicators import TechnicalIndicators
+
+# シンボルマッピング: bitFlyer(JPY) → Binance(USDT)
+SYMBOL_MAPPING = {
+    'BTC/JPY': 'BTC/USDT',
+    'ETH/JPY': 'ETH/USDT',
+    'XRP/JPY': 'XRP/USDT',
+    'LTC/JPY': 'LTC/USDT',
+}
 
 # Phase 2: ML Models
 from ml.training.feature_engineering import FeatureEngineer
@@ -143,9 +152,12 @@ class CryptoTrader:
         else:
             logger.info("  ✓ 不完全なペアポジションなし")
 
-        self.data_collector = BitflyerDataCollector()
+        self.data_collector = BitflyerDataCollector()  # 取引実行用
+        self.binance_collector = BinanceDataCollector()  # 過去データ取得用
         self.indicators = TechnicalIndicators()
         logger.info("  ✓ データベース、API、指標計算モジュール初期化完了")
+        logger.info("    - bitFlyer: 取引実行")
+        logger.info("    - Binance: 過去データ取得（モデル学習用）")
 
         # Phase 2: MLモデル初期化
         logger.info("\n[Phase 2] MLモデル初期化")
@@ -520,22 +532,28 @@ class CryptoTrader:
             logger.info(f"\n[{symbol}] モデル学習開始（過去{training_days}日間のデータ使用）")
 
             try:
-                # 学習データ取得（1時間足）
-                limit = training_days * 24  # 時間数
-                logger.info(f"  → データ取得中: {limit}本の1時間足データ")
+                # 学習データ取得（1時間足）- Binance APIを使用
+                binance_symbol = SYMBOL_MAPPING.get(symbol, symbol.replace('/JPY', '/USDT'))
+                logger.info(f"  → Binance ({binance_symbol}) からデータ取得中...")
 
-                ohlcv_data = self.data_collector.fetch_ohlcv(symbol, '1h', limit)
+                # Binanceから過去データを取得
+                from datetime import timedelta
+                start_date = datetime.now() - timedelta(days=training_days)
+                df = self.binance_collector.fetch_ohlcv_bulk(
+                    symbol=binance_symbol,
+                    timeframe='1h',
+                    start_date=start_date,
+                    batch_size=1000
+                )
 
-                if ohlcv_data is None or len(ohlcv_data) < 100:
+                if df is None or len(df) < 100:
                     logger.error(f"  ✗ {symbol} データ取得失敗またはデータ不足")
                     continue
 
-                # DataFrame作成
-                df = pd.DataFrame(
-                    ohlcv_data,
-                    columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
-                )
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                logger.info(f"  → データ取得完了: {len(df)}本の1時間足データ")
+
+                # タイムスタンプを変換（Binanceは秒単位で返却）
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
 
                 # テクニカル指標計算
                 logger.info(f"  → テクニカル指標計算中")
