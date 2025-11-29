@@ -76,8 +76,13 @@ def prepare_data(symbol: str, days: int = 730) -> pd.DataFrame:
     logger.info("特徴量エンジニアリング中...")
     df = feature_engineer.create_all_features(df)
 
-    # NaN除去
-    df = df.dropna()
+    # NaN除去（数値列のみ対象）
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    df = df.dropna(subset=numeric_cols)
+
+    # 無限値を除去
+    df = df.replace([np.inf, -np.inf], np.nan)
+    df = df.dropna(subset=numeric_cols)
 
     logger.info(f"データ準備完了: {len(df)}サンプル")
 
@@ -94,12 +99,21 @@ def model_trainer(train_df: pd.DataFrame) -> EnsembleModel:
     # ターゲット作成
     df = train_df.copy()
     df['future_return'] = df['close'].shift(-1) / df['close'] - 1
+
+    # NaN行を先に除去してからカテゴリ変換
+    df = df.dropna(subset=['future_return'])
+
     df['target_direction'] = pd.cut(
         df['future_return'],
         bins=[-np.inf, -0.005, 0.005, np.inf],
-        labels=[-1, 0, 1]
+        labels=[0, 1, 2]  # -1,0,1ではなく0,1,2を使用（整数変換の問題回避）
     ).astype(int)
+
+    # 残りのNaNを除去
     df = df.dropna()
+
+    if len(df) < 100:
+        raise ValueError(f"学習データ不足: {len(df)}サンプル")
 
     # 学習
     model.fit(df, target_col='target_direction')

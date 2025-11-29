@@ -1,6 +1,6 @@
 # CryptoTrader - 暗号資産自動売買システム
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B%20|%203.12-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 円建て（JPY）での暗号資産自動売買システム。BTC/JPY・ETH/JPYの取引に対応し、機械学習による価格予測と段階的な利益確定・リスク管理機能を実装。
@@ -20,7 +20,10 @@
 ## ✨ 特徴
 
 ### 📊 Phase 1: データインフラ
-- **bitFlyer API統合** - 円建て取引（BTC/JPY, ETH/JPY）
+- **デュアルAPI構成**
+  - **Binance API** - 過去データ取得（モデル学習用、fetchOHLCV対応）
+  - **bitFlyer API** - リアルタイムデータ・取引実行（円建て）
+- **シンボルマッピング** - BTC/JPY → BTC/USDT 自動変換
 - **SQLite データベース** - 3DB構成（価格・取引・MLモデル）
 - **テクニカル指標** - 20種類以上の指標を自動計算
 - **タスクスケジューラー** - APSchedulerによる自動実行
@@ -72,7 +75,7 @@
 ```
 CryptoTrader/
 ├── data/                   # データ収集・処理
-│   ├── collector/         # bitFlyer API
+│   ├── collector/         # Binance + bitFlyer API
 │   ├── processor/         # テクニカル指標
 │   └── storage/           # SQLite DB管理
 ├── ml/                     # 機械学習
@@ -99,7 +102,7 @@ CryptoTrader/
 - **ストレージ**: 10GB以上の空き容量
 
 ### ソフトウェア
-- **Python**: 3.11以上
+- **Python**: 3.11以上（3.12対応済み）
 - **OS**: Linux / macOS / Windows（WSL推奨）
 - **Git**: バージョン管理
 
@@ -111,6 +114,24 @@ CryptoTrader/
 ### オプション（推奨）
 - **Telegram Bot**: 通知機能
 - **VPS**: Hostinger等（24時間稼働）
+
+### データソースについて
+
+本システムは **デュアルAPI構成** を採用しています：
+
+| 用途 | API | 理由 |
+|------|-----|------|
+| 過去データ（モデル学習） | Binance | fetchOHLCV()対応、大量データ取得可能 |
+| リアルタイムデータ | bitFlyer | 円建て取引所 |
+| 取引実行 | bitFlyer | 円建て注文執行 |
+
+**シンボルマッピング（自動変換）:**
+```
+BTC/JPY → BTC/USDT（Binance）
+ETH/JPY → ETH/USDT（Binance）
+```
+
+> **注:** bitFlyer APIは`fetchOHLCV()`非対応のため、過去データ取得にはBinance APIを使用。Binance APIキーは不要（公開エンドポイント使用）。
 
 ## 🚀 セットアップ
 
@@ -195,9 +216,10 @@ pip list | grep -E "anthropic|python-telegram-bot|ccxt|lightgbm"
 **期待される出力:**
 ```
 anthropic          0.40.0以上
-ccxt               4.1.40以上
-lightgbm           4.1.0以上
-python-telegram-bot 20.6
+ccxt               4.5.0以上
+lightgbm           4.3.0以上
+python-telegram-bot 20.7
+ta                 0.11.0
 ```
 
 **パッケージが見つからない場合:**
@@ -281,6 +303,26 @@ python main_trader.py --test --interval 1
 # .envにAPIキー設定済みであることを確認
 python main_trader.py --interval 5
 ```
+
+#### 4. バックグラウンド実行（systemd推奨）
+
+ターミナルを閉じてもシステムを稼働させ続けるには、systemdサービスを使用：
+
+```bash
+# サービス開始
+sudo systemctl start cryptotrader
+
+# 自動起動有効化
+sudo systemctl enable cryptotrader
+
+# 状態確認
+sudo systemctl status cryptotrader
+
+# ログ確認
+sudo journalctl -u cryptotrader -f
+```
+
+> **詳細設定:** 本番サーバーへのデプロイ手順は `DEPLOYMENT.md` のセクション12を参照
 
 ### コマンドラインオプション
 
@@ -375,8 +417,10 @@ ETH配分: 40% → ¥80,000
 bitflyer fetchOHLCV() is not supported yet
 ```
 
-**原因**: bitFlyerはfetchOHLCV()未サポート
-**解決**: 自動的にfetch_trades()からOHLCVを構築（実装済み）
+**原因**: bitFlyerはfetchOHLCV()未サポート（過去データ取得不可）
+**解決**: 過去データ取得にはBinance APIを使用（自動切り替え済み）
+- モデル学習: Binance API（BTC/USDT, ETH/USDT）
+- 取引執行: bitFlyer API（BTC/JPY, ETH/JPY）
 
 #### 2. モデル読み込みエラー
 
@@ -404,6 +448,21 @@ Telegram通知が無効です
 
 **原因**: Token/Chat ID未設定
 **解決**: `.env`で`TELEGRAM_BOT_TOKEN`と`TELEGRAM_CHAT_ID`を設定
+
+#### 5. Python 3.12でのインストールエラー
+
+```
+pip install でエラーが発生
+```
+
+**原因**: 一部パッケージがPython 3.12非対応のバージョン
+**解決**: requirements.txtは3.12対応済み。以下のバージョンを確認：
+```
+numpy>=1.26.0     # 1.24.xはPython 3.12非対応
+pandas>=2.1.0
+ta==0.11.0        # pandas-taの代替（numpy 2.x競合回避）
+ccxt>=4.5.0
+```
 
 ### ログ確認
 
@@ -489,6 +548,7 @@ MIT License - 詳細は[LICENSE](LICENSE)を参照
 ## 📚 参考リンク
 
 - [bitFlyer API ドキュメント](https://lightning.bitflyer.com/docs)
+- [Binance API ドキュメント](https://binance-docs.github.io/apidocs/)
 - [ccxt ドキュメント](https://docs.ccxt.com/)
 - [LightGBM ドキュメント](https://lightgbm.readthedocs.io/)
 - [hmmlearn ドキュメント](https://hmmlearn.readthedocs.io/)
