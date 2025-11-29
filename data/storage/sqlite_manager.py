@@ -3,8 +3,10 @@
 import sqlite3
 import logging
 import os
+import time
+import uuid
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable
 from datetime import datetime
 import pandas as pd
 
@@ -50,16 +52,62 @@ class SQLiteManager:
             WALモード有効化されたsqlite3.Connection
         """
         conn = sqlite3.connect(db_path)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        self._configure_database_safety(conn)
+        return conn
+
+    def _configure_database_safety(self, conn: sqlite3.Connection):
+        """
+        SQLiteを最大限のクラッシュ安全性に設定
+
+        CRITICAL: すべての接続で呼び出す必要がある
+        """
+        try:
+            # Write-Ahead Logging（ロールバックジャーナルより安全）
+            conn.execute("PRAGMA journal_mode=WAL")
+
+            # 毎コミットで完全fsync（遅いが安全）
+            conn.execute("PRAGMA synchronous=FULL")
+
+            # 外部キー制約を有効化
+            conn.execute("PRAGMA foreign_keys=ON")
+
+            # より大きなキャッシュでパフォーマンス向上
+            conn.execute("PRAGMA cache_size=-64000")  # 64MB
+
+            # 安全な削除（削除データを上書き）
+            conn.execute("PRAGMA secure_delete=ON")
+
+            conn.commit()
+
+            # 設定を検証
+            result = conn.execute("PRAGMA journal_mode").fetchone()
+            if result[0] != 'wal':
+                raise Exception("WALモードの有効化に失敗しました")
+
+            logger.debug("データベース安全設定完了: WALモード, FULL同期, FK有効")
+
+        except Exception as e:
+            logger.error(f"データベース安全設定に失敗: {e}")
+            raise
+
+    def _get_connection(self, db_path) -> sqlite3.Connection:
+        """
+        適切に設定されたデータベース接続を取得
+
+        Args:
+            db_path: データベースファイルパス
+
+        Returns:
+            設定済みのsqlite3.Connection
+        """
+        conn = sqlite3.connect(db_path)
+        self._configure_database_safety(conn)
         return conn
 
     def _init_price_db(self):
         """価格データベースの初期化"""
         conn = sqlite3.connect(self.price_db)
-        # WALモード有効化（クラッシュ時の安全性向上）
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")  # WALと組み合わせて性能向上
+        self._configure_database_safety(conn)
         cursor = conn.cursor()
 
         # OHLCVテーブル
@@ -127,9 +175,7 @@ class SQLiteManager:
     def _init_trades_db(self):
         """取引データベースの初期化"""
         conn = sqlite3.connect(self.trades_db)
-        # WALモード有効化（クラッシュ時の安全性向上）
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        self._configure_database_safety(conn)
         cursor = conn.cursor()
 
         # 取引履歴テーブル
@@ -224,11 +270,29 @@ class SQLiteManager:
         )
         """)
 
+        # ペアポジション状態追跡テーブル（クラッシュリカバリー用）
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS pair_position_states (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair_id TEXT UNIQUE NOT NULL,
+            state TEXT NOT NULL,
+            symbol1 TEXT NOT NULL,
+            symbol2 TEXT NOT NULL,
+            size1 REAL,
+            size2 REAL,
+            order1_id TEXT,
+            order2_id TEXT,
+            created_at INTEGER DEFAULT (strftime('%s', 'now')),
+            updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+        )
+        """)
+
         # インデックス作成
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_time ON trades(symbol, timestamp)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_daily_pnl_date ON daily_pnl(date)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_pair_positions_status ON pair_positions(status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_pair_states_state ON pair_position_states(state)")
 
         conn.commit()
         conn.close()
@@ -243,9 +307,7 @@ class SQLiteManager:
     def _init_ml_models_db(self):
         """MLモデルデータベースの初期化"""
         conn = sqlite3.connect(self.ml_models_db)
-        # WALモード有効化（クラッシュ時の安全性向上）
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        self._configure_database_safety(conn)
         cursor = conn.cursor()
 
         # モデルメタデータテーブル
@@ -620,6 +682,265 @@ class SQLiteManager:
 
         conn.close()
         return None
+
+    # ========== アトミック操作メソッド（クラッシュセーフ） ==========
+
+    def create_position_atomic(self, position_data: Dict[str, Any], order_callback: Callable) -> str:
+        """
+        アトミックにポジションを作成（注文実行と同時）
+
+        Args:
+            position_data: ポジション詳細
+            order_callback: 注文を実行する関数
+
+        Returns:
+            成功時はポジションID、失敗時は例外を発生
+
+        Raises:
+            Exception: 注文失敗時またはDB操作失敗時
+        """
+        position_id = str(uuid.uuid4())
+
+        conn = self._get_connection(self.trades_db)
+        conn.execute("BEGIN IMMEDIATE")
+
+        try:
+            cursor = conn.cursor()
+
+            # Step 1: まずPENDINGポジションをDBに書き込む
+            cursor.execute("""
+            INSERT INTO positions (
+                position_id, symbol, side, entry_price, entry_amount,
+                entry_time, stop_loss, take_profit, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+            """, (
+                position_id,
+                position_data['symbol'],
+                position_data['side'],
+                position_data['entry_price'],
+                position_data['entry_amount'],
+                int(time.time()),
+                position_data.get('stop_loss'),
+                position_data.get('take_profit')
+            ))
+            conn.commit()
+
+            # Step 2: 取引所で注文実行
+            # 失敗した場合、pendingポジションをクリーンアップ可能
+            try:
+                order = order_callback()
+
+                if not order or order.get('status') not in ['closed', 'filled']:
+                    raise Exception(f"注文失敗: {order}")
+
+            except Exception as order_error:
+                # 注文失敗 - pendingポジションを削除
+                logger.error(f"注文実行失敗: {order_error}")
+                cursor.execute("DELETE FROM positions WHERE position_id = ?", (position_id,))
+                conn.commit()
+                raise
+
+            # Step 3: ポジションを'open'に更新
+            cursor.execute("""
+            UPDATE positions
+            SET status = 'open', updated_at = strftime('%s', 'now')
+            WHERE position_id = ?
+            """, (position_id,))
+            conn.commit()
+
+            logger.info(f"✓ アトミックにポジション作成完了: {position_id}")
+            return position_id
+
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"アトミックポジション作成失敗: {e}")
+            raise
+        finally:
+            conn.close()
+
+    def create_pair_position_atomic(
+        self,
+        pair_data: Dict[str, Any],
+        order1_callback: Callable,
+        order2_callback: Callable
+    ) -> str:
+        """
+        状態追跡付きでアトミックにペアポジションを作成
+
+        Args:
+            pair_data: ペアポジションデータ
+            order1_callback: 1つ目の注文を実行する関数
+            order2_callback: 2つ目の注文を実行する関数
+
+        Returns:
+            成功時はペアID
+
+        Raises:
+            Exception: 注文失敗時（手動修正が必要な場合あり）
+        """
+        conn = self._get_connection(self.trades_db)
+        conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.cursor()
+
+        pair_id = pair_data['pair_id']
+
+        try:
+            # State 1: pendingペアを記録
+            cursor.execute("""
+            INSERT INTO pair_position_states
+            (pair_id, state, symbol1, symbol2, size1, size2)
+            VALUES (?, 'pending', ?, ?, ?, ?)
+            """, (pair_id, pair_data['symbol1'], pair_data['symbol2'],
+                  pair_data['size1'], pair_data['size2']))
+            conn.commit()
+
+            # 注文1を実行
+            order1 = order1_callback()
+            if not order1 or order1.get('status') not in ['closed', 'filled']:
+                cursor.execute("UPDATE pair_position_states SET state = 'failed' WHERE pair_id = ?", (pair_id,))
+                conn.commit()
+                raise Exception(f"注文1失敗: {order1}")
+
+            # State 2: 1つ目の注文完了
+            cursor.execute("""
+            UPDATE pair_position_states
+            SET state = 'first_order_complete', order1_id = ?, updated_at = strftime('%s', 'now')
+            WHERE pair_id = ?
+            """, (order1.get('id'), pair_id))
+            conn.commit()
+
+            # 注文2を実行
+            try:
+                order2 = order2_callback()
+                if not order2 or order2.get('status') not in ['closed', 'filled']:
+                    raise Exception(f"注文2失敗: {order2}")
+            except Exception as order2_error:
+                # CRITICAL: 注文1は成功したが注文2が失敗
+                # 補償取引が必要（またはマニュアル対応）
+                logger.critical(f"ペアトレード不完全: 注文1成功、注文2失敗!")
+                logger.critical(f"手動介入が必要: pair_id: {pair_id}")
+
+                cursor.execute("""
+                UPDATE pair_position_states
+                SET state = 'incomplete_needs_manual_fix'
+                WHERE pair_id = ?
+                """, (pair_id,))
+                conn.commit()
+
+                raise Exception(f"ペアトレード不完全 - 手動修正が必要: {pair_id}")
+
+            # State 3: 両方の注文完了 - フルポジション作成
+            cursor.execute("""
+            UPDATE pair_position_states
+            SET state = 'open', order2_id = ?, updated_at = strftime('%s', 'now')
+            WHERE pair_id = ?
+            """, (order2.get('id'), pair_id))
+
+            # 実際のペアポジションレコードを作成
+            cursor.execute("""
+            INSERT INTO pair_positions (
+                pair_id, symbol1, symbol2, direction, hedge_ratio,
+                entry_spread, entry_z_score, entry_time,
+                size1, size2, entry_price1, entry_price2, entry_capital, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')
+            """, (
+                pair_id, pair_data['symbol1'], pair_data['symbol2'],
+                pair_data['direction'], pair_data['hedge_ratio'],
+                pair_data['entry_spread'], pair_data['entry_z_score'],
+                int(time.time()),
+                pair_data['size1'], pair_data['size2'],
+                pair_data['entry_price1'], pair_data['entry_price2'],
+                pair_data['entry_capital']
+            ))
+            conn.commit()
+
+            logger.info(f"✓ アトミックにペアポジション作成完了: {pair_id}")
+            return pair_id
+
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"ペアポジション作成失敗: {e}")
+            raise
+        finally:
+            conn.close()
+
+    def recover_incomplete_pairs(self) -> List[Dict[str, Any]]:
+        """
+        起動時に不完全なペアポジションをチェック
+
+        Returns:
+            手動介入が必要なペアのリスト
+        """
+        conn = self._get_connection(self.trades_db)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+        SELECT pair_id, state, symbol1, symbol2, size1, size2, order1_id, order2_id,
+               created_at, updated_at
+        FROM pair_position_states
+        WHERE state IN ('first_order_complete', 'incomplete_needs_manual_fix', 'pending')
+        """)
+
+        columns = ['pair_id', 'state', 'symbol1', 'symbol2', 'size1', 'size2',
+                   'order1_id', 'order2_id', 'created_at', 'updated_at']
+        rows = cursor.fetchall()
+        conn.close()
+
+        incomplete = [dict(zip(columns, row)) for row in rows]
+
+        if incomplete:
+            logger.critical(f"不完全なペアポジションを{len(incomplete)}件検出!")
+            logger.critical("取引開始前に手動確認が必要です!")
+
+        return incomplete
+
+    def cleanup_pending_positions(self) -> int:
+        """
+        古いpendingポジションをクリーンアップ（10分以上前のもの）
+
+        Returns:
+            削除された件数
+        """
+        conn = self._get_connection(self.trades_db)
+        cursor = conn.cursor()
+
+        # 10分以上前のpendingを削除
+        cutoff_time = int(time.time()) - 600
+
+        cursor.execute("""
+        DELETE FROM positions
+        WHERE status = 'pending' AND entry_time < ?
+        """, (cutoff_time,))
+
+        deleted_count = cursor.rowcount
+        conn.commit()
+        conn.close()
+
+        if deleted_count > 0:
+            logger.warning(f"古いpendingポジションを{deleted_count}件削除しました")
+
+        return deleted_count
+
+    def mark_pair_state_resolved(self, pair_id: str, resolution: str = 'manually_resolved'):
+        """
+        不完全なペア状態を解決済みにマーク
+
+        Args:
+            pair_id: ペアID
+            resolution: 解決方法の説明
+        """
+        conn = self._get_connection(self.trades_db)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+        UPDATE pair_position_states
+        SET state = ?, updated_at = strftime('%s', 'now')
+        WHERE pair_id = ?
+        """, (resolution, pair_id))
+
+        conn.commit()
+        conn.close()
+        logger.info(f"ペア状態を解決済みにマーク: {pair_id} → {resolution}")
 
     # ========== データ取得メソッド ==========
 

@@ -99,6 +99,9 @@ class CryptoTrader:
         self.indicators = TechnicalIndicators()
         logger.info("  ✓ データベース、API、指標計算モジュール初期化完了")
 
+        # クラッシュリカバリーチェック
+        self._check_crash_recovery()
+
         # Phase 2: MLモデル初期化
         logger.info("\n[Phase 2] MLモデル初期化")
         self.feature_engineer = FeatureEngineer()
@@ -643,6 +646,47 @@ class CryptoTrader:
             logger.error(f"残高取得エラー: {e}")
             return 0.0
 
+    def _check_crash_recovery(self):
+        """
+        起動時のクラッシュリカバリーチェック
+
+        不完全なポジション状態を検出し、必要に応じて警告・停止する
+        """
+        logger.info("\n[クラッシュリカバリー] 不完全な状態をチェック中...")
+
+        # 1. 古いpendingポジションをクリーンアップ
+        cleaned = self.db_manager.cleanup_pending_positions()
+        if cleaned > 0:
+            logger.warning(f"  ⚠️  古いpendingポジション{cleaned}件を削除しました")
+
+        # 2. 不完全なペアポジションをチェック
+        incomplete_pairs = self.db_manager.recover_incomplete_pairs()
+
+        if incomplete_pairs:
+            logger.critical("=" * 70)
+            logger.critical("⛔ 不完全なペアポジションを検出しました")
+            logger.critical("=" * 70)
+
+            for pair in incomplete_pairs:
+                logger.critical(f"  ペアID: {pair['pair_id']}")
+                logger.critical(f"  状態: {pair['state']}")
+                logger.critical(f"  ペア: {pair['symbol1']}/{pair['symbol2']}")
+                if pair.get('order1_id'):
+                    logger.critical(f"  注文1 ID: {pair['order1_id']}")
+                logger.critical("-" * 50)
+
+            if not self.test_mode:
+                # 本番モードでは起動を拒否
+                raise RuntimeError(
+                    "不完全なペアポジションが存在します。"
+                    "手動で確認・解決してから再起動してください。"
+                    "解決後は db_manager.mark_pair_state_resolved(pair_id) を実行してください。"
+                )
+            else:
+                logger.warning("  ⚠️  テストモードのため警告のみで続行します")
+
+        logger.info("  ✓ クラッシュリカバリーチェック完了")
+
     def _handle_api_failure(self, operation: str = "API操作"):
         """
         API失敗時の処理
@@ -830,56 +874,45 @@ class CryptoTrader:
                 logger.warning(f"  {symbol} ポジションサイズ不足")
                 return
 
-            # 注文実行（二段階コミット）
+            # 注文実行（アトミック操作）
             logger.info(f"  → 新規エントリー: {side.upper()} {quantity:.6f} {symbol} @ ¥{current_price:,.0f}")
 
-            pending_position = None  # 例外ハンドリング用に初期化
-
-            # 1. 保留ポジション作成（DB記録）
-            pending_position = self.position_manager.create_pending_position(
-                symbol=symbol,
-                side=side,
-                entry_price=current_price,
-                quantity=quantity
-            )
-
-            if not pending_position:
-                logger.error(f"  ✗ 保留ポジション作成失敗: {symbol}")
-                return
-
-            # 2. 注文実行（API障害検出機能付き）
-            try:
+            # 注文コールバック関数を定義
+            def execute_order():
                 order = self.order_executor.create_market_order(
                     symbol,
                     'buy' if side == 'long' else 'sell',
                     quantity
                 )
-
                 # API成功
                 self._handle_api_success()
+                return order
 
-            except Exception as api_error:
-                # API障害検出
-                self._handle_api_failure(operation=f"{symbol} 注文実行")
-                self.position_manager.cancel_pending_position(
-                    pending_position,
-                    reason=f"API障害: {str(api_error)}"
+            # ポジションデータを準備
+            position_data = {
+                'symbol': symbol,
+                'side': side,
+                'entry_price': current_price,
+                'entry_amount': quantity,
+                'stop_loss': None,
+                'take_profit': None
+            }
+
+            # アトミック操作でポジション作成と注文実行を同時に行う
+            try:
+                position_id = self.db_manager.create_position_atomic(
+                    position_data,
+                    execute_order
                 )
-                logger.error(f"  ✗ API障害により注文失敗: {api_error}")
-                return
 
-            # 3. 注文結果に応じて確定またはキャンセル
-            if order and order['status'] in ['closed', 'filled']:
-                # 実際の約定価格を取得（ない場合は予定価格を使用）
-                actual_price = order.get('price', current_price)
+                # メモリ上のポジションマネージャーにも登録
+                from trading.position_manager import Position
+                position = Position(symbol, side, current_price, quantity)
+                position.position_id = position_id
+                position.status = 'open'
+                self.position_manager.open_positions[symbol] = position
 
-                # ポジション確定
-                if self.position_manager.confirm_pending_position(pending_position, actual_price):
-                    logger.info(f"  ✓ エントリー成功: ポジションID={pending_position.position_id}")
-                    position = pending_position
-                else:
-                    logger.error(f"  ✗ ポジション確定失敗")
-                    return
+                logger.info(f"  ✓ エントリー成功（アトミック）: ポジションID={position_id}")
 
                 # Telegram通知
                 self.notifier.notify_trade_open(
@@ -888,22 +921,14 @@ class CryptoTrader:
                     current_price,
                     quantity
                 )
-            else:
-                # 注文失敗時は保留ポジションをキャンセル
-                self.position_manager.cancel_pending_position(
-                    pending_position,
-                    reason=f"注文失敗: {order.get('status', 'unknown') if order else 'no_order'}"
-                )
-                # API自体は成功したが注文が約定しなかった（これはAPI障害ではない）
-                logger.error(f"  ✗ 注文失敗: {order}")
+
+            except Exception as order_error:
+                # API障害検出
+                self._handle_api_failure(operation=f"{symbol} 注文実行")
+                logger.error(f"  ✗ アトミック注文失敗: {order_error}")
+                return
 
         except Exception as e:
-            # 例外発生時も保留ポジションをキャンセル
-            if pending_position and pending_position.status == 'pending_execution':
-                self.position_manager.cancel_pending_position(
-                    pending_position,
-                    reason=f"例外発生: {str(e)}"
-                )
             logger.error(f"{symbol} エントリーエラー: {e}")
             logger.error(traceback.format_exc())
 

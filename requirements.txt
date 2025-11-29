@@ -39,6 +39,7 @@ python-dotenv==1.0.0
 # ユーティリティ
 requests==2.31.0
 tqdm==4.66.1
+psutil==5.9.6
 
 # AI/LLM
 anthropic>=0.40.0
