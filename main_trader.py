@@ -667,19 +667,11 @@ class CryptoTrader:
             # テクニカル指標計算
             df = self.indicators.calculate_all(df)
 
-            # DB保存
-            for _, row in df.iterrows():
-                ohlcv_dict = {
-                    'timestamp': int(row['timestamp'].timestamp()),  # Unix timestamp (INTEGER)
-                    'symbol': symbol,
-                    'timeframe': timeframe,
-                    'open': row['open'],
-                    'high': row['high'],
-                    'low': row['low'],
-                    'close': row['close'],
-                    'volume': row['volume']
-                }
-                self.db_manager.insert_ohlcv(ohlcv_dict)
+            # DB保存（DataFrameをそのまま渡す）
+            # timestampをUnix秒に変換
+            df_to_save = df.copy()
+            df_to_save['timestamp'] = df_to_save['timestamp'].astype(int) // 10**9
+            self.db_manager.insert_ohlcv(df_to_save[['timestamp', 'open', 'high', 'low', 'close', 'volume']], symbol, timeframe)
 
             logger.info(f"  ✓ {symbol} データ収集・保存完了 ({len(df)}件)")
             return df
