@@ -253,6 +253,18 @@ class WalkForwardEngine:
 
         s = self.summary
 
+        # エラーチェック
+        if 'error' in s:
+            print(f"\n【エラー】")
+            print(f"  {s['error']}")
+            print(f"  全{len(self.results)}個のFoldが失敗しました。")
+            print("\n失敗理由:")
+            for r in self.results[:5]:  # 最初の5件を表示
+                if 'error' in r:
+                    print(f"  Fold {r.get('fold', '?')}: {r['error']}")
+            print("=" * 70)
+            return
+
         print(f"\n【検証概要】")
         print(f"  総Fold数:          {s['total_folds']}")
         print(f"  有効Fold数:        {s['valid_folds']}")
